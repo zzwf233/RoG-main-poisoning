@@ -1,0 +1,41 @@
+.vscode/
+datasets/joint_training
+datasets/AlignData
+logs/
+ref_examples/
+results/
+test/
+wandb/
+save_models/
+.env
+*.pyc
+tmp/
+RoG_train.tar.gz
+# 忽略数据集
+datasets/
+archive_previous_experiments/
+
+# 忽略模型
+R6G-model/
+RoG-model/
+*.bin
+*.pt
+*.safetensors
+
+# 忽略IDE配置 (你也看到了 .idea 文件夹)
+.idea/
+.vscode/
+
+# 忽略实验结果
+results/
+config/
+resources/
+# 注意：如果你想保留 config 和 resources 里的代码，就不要加这两行
+# 但通常 results 必须忽略
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+.env
+.env.example
+venv/
