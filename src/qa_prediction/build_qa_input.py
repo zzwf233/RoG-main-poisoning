@@ -40,8 +40,10 @@ class PromptBuilder(object):
         results = []
         for entity in srouce_entities:
             for rule in rules:
-                # 🔍 增加安全性：确保 rule 是列表，防止字符串被错误遍历
+                # 兼容字符串规则：将单关系字符串视为 1-hop 规则
                 if isinstance(rule, str):
+                    rule = [rule.strip()]
+                if not isinstance(rule, list) or len(rule) == 0:
                     continue
                 res = utils.bfs_with_rule(graph, entity, rule)
                 results.extend(res)
