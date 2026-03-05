@@ -4,6 +4,7 @@ import json
 import os
 import random
 import uuid
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
@@ -324,6 +325,65 @@ def _resolve_rule_for_id(rules: Dict[str, Tuple[str, Optional[str]]], qid: str):
         return rules.get(parent)
     return None
 
+def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
+    """
+    二次处理：在同一 parent 的子问题链中做 bridge 继承。
+
+    规则：当当前样本满足
+    - needs_prev_answer=True
+    - dep_type == "bridge"
+    - 上一个子问题已有 poison_target
+
+    则将当前样本的 poison_target / poison_target_entity / target_answer 继承为上一个子问题的 poison_target。
+    """
+
+    grouped = defaultdict(list)
+    passthrough = []
+
+    for it in items:
+        if "parent_id" in it and "sub_id" in it:
+            grouped[str(it.get("parent_id"))].append(it)
+        else:
+            passthrough.append(it)
+
+    out = []
+    for parent_id, arr in grouped.items():
+        def _sub_sort_key(x):
+            sid = x.get("sub_id", 10**9)
+            try:
+                return int(sid)
+            except Exception:
+                return 10**9
+
+        arr.sort(key=_sub_sort_key)
+
+        prev_target = ""
+        prev_sub_id = None
+        for it in arr:
+            cur = copy.deepcopy(it)
+            dep_type = str(cur.get("dep_type", "")).strip().lower()
+            needs_prev = bool(cur.get("needs_prev_answer", False))
+
+            if cur.get("is_poisoned") and needs_prev and dep_type == "bridge" and prev_target:
+                cur["poison_target"] = prev_target
+                cur["poison_target_entity"] = prev_target
+                cur["target_answer"] = prev_target
+                cur["inherited_from_sub_id"] = prev_sub_id
+                cur["inherited_target"] = prev_target
+                cur["is_dependency_injected"] = True
+            else:
+                cur["is_dependency_injected"] = False
+
+            if cur.get("is_poisoned"):
+                t = str(cur.get("poison_target", "")).strip()
+                if t:
+                    prev_target = t
+                    prev_sub_id = cur.get("sub_id")
+
+            out.append(cur)
+
+    out.extend(passthrough)
+    return out
 
 def main():
     args = parse_args()
@@ -351,89 +411,96 @@ def main():
     success_count = 0
     print("🚀 开始执行 Pivot Injection 攻击...")
 
-    with open(args.output_file, "w", encoding="utf-8") as f_out:
-        for item in tqdm(raw_data):
-            qid = str(item.get("id", "")).strip()
-            question = item.get("question", "")
-            ground_truth = item.get("answer", "")
-            if isinstance(ground_truth, list) and ground_truth:
-                ground_truth = ground_truth[0]
-            ground_truth = str(ground_truth)
+    new_items = []
+    for item in tqdm(raw_data):
+        qid = str(item.get("id", "")).strip()
+        question = item.get("question", "")
+        ground_truth = item.get("answer", "")
+        if isinstance(ground_truth, list) and ground_truth:
+            ground_truth = ground_truth[0]
+        ground_truth = str(ground_truth)
 
-            rule_info = _resolve_rule_for_id(rog_rules, qid)
-            if not rule_info:
-                f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
-                continue
+        rule_info = _resolve_rule_for_id(rog_rules, qid)
+        if not rule_info:
+            new_items.append(item)
+            continue
 
-            r1_clean, r2_clean = rule_info
-            start_nodes = find_potential_start_nodes(item)
-            if not start_nodes:
-                f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
-                continue
+        r1_clean, r2_clean = rule_info
+        start_nodes = find_potential_start_nodes(item)
+        if not start_nodes:
+            new_items.append(item)
+            continue
 
-            # ===== 关键改动：构建当前样本实体池并传给 planner =====
-            candidate_entities = build_readable_entity_pool(item)
+        # ===== 关键改动：构建当前样本实体池并传给 planner =====
+        candidate_entities = build_readable_entity_pool(item)
 
-            primary_start_node = str(start_nodes[0])
-            attack_plan = llm_plan_pivot_attack(
-                client=client,
-                model_name=args.model_name,
-                question=question,
-                original_answer=ground_truth,
-                r1=r1_clean,
-                r2=r2_clean,
-                candidate_entities=candidate_entities,
-                temperature=args.temperature,
-            )
+        primary_start_node = str(start_nodes[0])
+        attack_plan = llm_plan_pivot_attack(
+            client=client,
+            model_name=args.model_name,
+            question=question,
+            original_answer=ground_truth,
+            r1=r1_clean,
+            r2=r2_clean,
+            candidate_entities=candidate_entities,
+            temperature=args.temperature,
+        )
 
-            if not attack_plan or not attack_plan.get("pivot_node"):
-                f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
-                continue
+        if not attack_plan or not attack_plan.get("pivot_node"):
+            new_items.append(item)
+            continue
 
-            pivot_name = str(attack_plan.get("pivot_node", "")).strip()
-            target_answer = str(attack_plan.get("target_answer", "")).strip()
-            if not target_answer:
-                f_out.write(json.dumps(item, ensure_ascii=False) + "\n")
-                continue
+        pivot_name = str(attack_plan.get("pivot_node", "")).strip()
+        target_answer = str(attack_plan.get("target_answer", "")).strip()
+        if not target_answer:
+            new_items.append(item)
+            continue
 
-            unique_tag = uuid.uuid4().hex[:6]
-            fake_pivot_id = f"m.piv_{unique_tag}"
-            target_ans_id = f"m.tgt_{unique_tag}"
+        unique_tag = uuid.uuid4().hex[:6]
+        fake_pivot_id = f"m.piv_{unique_tag}"
+        target_ans_id = f"m.tgt_{unique_tag}"
 
-            original_graph = copy.deepcopy(item.get("graph", []))
-            poison_triples = [
-                [fake_pivot_id, "type.object.name", pivot_name],
-                [target_ans_id, "type.object.name", target_answer],
-            ]
+        original_graph = copy.deepcopy(item.get("graph", []))
+        poison_triples = [
+            [fake_pivot_id, "type.object.name", pivot_name],
+            [target_ans_id, "type.object.name", target_answer],
+        ]
 
+        for _ in range(args.hop_repeat):
+            poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+
+        if r2_clean:
             for _ in range(args.hop_repeat):
-                poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+                poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+        else:
+            for _ in range(args.single_hop_repeat):
+                poison_triples.append([primary_start_node, r1_clean, target_ans_id])
 
-            if r2_clean:
-                for _ in range(args.hop_repeat):
-                    poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
-            else:
-                for _ in range(args.single_hop_repeat):
-                    poison_triples.append([primary_start_node, r1_clean, target_ans_id])
+        new_item = copy.deepcopy(item)
+        new_item["graph"] = poison_triples + original_graph
 
-            new_item = copy.deepcopy(item)
-            new_item["graph"] = poison_triples + original_graph
+        # 与当前预测/评估流水线字段兼容
+        new_item["dynamic_target_answer"] = target_answer
+        new_item["poison_target"] = target_answer
+        new_item["poison_target_entity"] = target_answer
+        new_item["target_answer"] = target_answer
 
-            # 与当前预测/评估流水线字段兼容
-            new_item["dynamic_target_answer"] = target_answer
-            new_item["poison_target"] = target_answer
-            new_item["poison_target_entity"] = target_answer
-            new_item["target_answer"] = target_answer
+        if primary_start_node.startswith("m."):
+            new_item["q_entity"] = [primary_start_node]
+            new_item["question_entity"] = primary_start_node
 
-            if primary_start_node.startswith("m."):
-                new_item["q_entity"] = [primary_start_node]
-                new_item["question_entity"] = primary_start_node
+        new_item["dynamic_pivot_name"] = pivot_name
+        new_item["is_poisoned"] = True
+        new_item["attack_mode"] = "pivot_llm"
+        success_count += 1
+        new_items.append(new_item)
 
-            new_item["dynamic_pivot_name"] = pivot_name
-            new_item["is_poisoned"] = True
-            new_item["attack_mode"] = "pivot_llm"
-            success_count += 1
-            f_out.write(json.dumps(new_item, ensure_ascii=False) + "\n")
+    # ===== 二次 pass：依赖 bridge 继承 =====
+    new_items = apply_dependency_bridge_targets(new_items)
+
+    with open(args.output_file, "w", encoding="utf-8") as f_out:
+        for it in new_items:
+            f_out.write(json.dumps(it, ensure_ascii=False) + "\n")
 
     print(f"✅ Pivot Injection 完成：成功修改 {success_count}/{len(raw_data)} 条。")
 
