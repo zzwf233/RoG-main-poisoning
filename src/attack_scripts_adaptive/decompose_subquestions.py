@@ -47,6 +47,18 @@ def split_question(question: str):
     return uniq
 
 
+def _infer_dep_type(subq: str, sub_id: int) -> str:
+    if sub_id == 0:
+        return "none"
+    q = (subq or "").lower()
+    # 很粗粒度启发式，可后续换成更强规则/模型
+    if any(x in q for x in [" it ", " its ", " they ", " them ", " that one ", " this one "]):
+        return "coref"
+    if any(x in q for x in [" which ", " what ", " where ", " when ", " who ", " whose "]):
+        return "filter"
+    return "bridge"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", required=True, type=str)
@@ -70,9 +82,15 @@ def main():
 
             # 如果拆不出来，就把原样本输出一次
             if len(subquestions) == 1 and subquestions[0].strip("?").lower() == q.strip("?").lower():
-                if "id" in item:
-                    item["id"] = str(item["id"])
-                fout.write(json.dumps(item, ensure_ascii=False) + "\n")
+                row = dict(item)
+                if "id" in row:
+                    row["id"] = str(row["id"])
+                row["parent_id"] = str(row.get("id", total - 1))
+                row["sub_id"] = 0
+                row["dep_prev_sub_id"] = None
+                row["dep_type"] = "none"
+                row["needs_prev_answer"] = False
+                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out_rows += 1
                 continue
 
@@ -83,13 +101,15 @@ def main():
                 row["sub_id"] = i
                 row["id"] = f"{parent_id}_{i}"
                 row["question"] = sq
+
+                # ===== 新增依赖字段 =====
+                row["dep_prev_sub_id"] = i - 1 if i > 0 else None
+                row["dep_type"] = _infer_dep_type(sq, i)
+                row["needs_prev_answer"] = (i > 0)
+
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out_rows += 1
 
     print(f"Input samples: {total}")
     print(f"Output sub-question samples: {out_rows}")
     print(f"Saved to: {output_path}")
-
-
-if __name__ == "__main__":
-    main()
