@@ -16,6 +16,7 @@ RULE_OUTPUT_ROOT=${RULE_OUTPUT_ROOT:-"results/gen_rule_path"}
 RULE_FILE=${RULE_FILE:-"${RULE_OUTPUT_ROOT}/clean_subquestions/RoG/test/predictions_3_False.jsonl"}
 POISONED_DATASET_PATH=${POISONED_DATASET_PATH:-"datasets/poisoned_subquestions.jsonl"}
 MODEL_PATH=${MODEL_PATH:-"rmanluo/RoG"}
+POISON_MODEL_NAME=${POISON_MODEL_NAME:-"Qwen/Qwen2.5-VL-72B-Instruct"}
 PROMPT_PATH=${PROMPT_PATH:-"prompts/llama2_predict.txt"}
 PRED_ROOT=${PRED_ROOT:-"results/KGQA"}
 EVAL_REPORT=${EVAL_REPORT:-"results/evaluation/cascade_eval_report.json"}
@@ -43,7 +44,7 @@ printf "\n[2/4] Inject adaptive multi-hop poison triples...\n"
 python src/attack_scripts_adaptive/poison_data_adaptive.py \
   --input_file "$DATASET_PATH" \
   --rule_file "$RULE_FILE" \
-  --model_path "$MODEL_PATH" \
+  --model_name "$POISON_MODEL_NAME" \
   --output_file "$POISONED_DATASET_PATH"
 
 printf "\n[3/4] Run clean inference...\n"
@@ -79,6 +80,7 @@ printf "\n[4/4] Evaluate clean ACC + poisoned ASR/A-H@1...\n"
 python src/evaluation/eval_cascade.py \
   --clean_pred_file "$CLEAN_PRED_FILE" \
   --poison_pred_file "$POISON_PRED_FILE" \
+  --poison_data_file "$POISONED_DATASET_PATH" \
   --report_file "$EVAL_REPORT"
 
 printf "\nDone. Report: %s\n" "$EVAL_REPORT"
