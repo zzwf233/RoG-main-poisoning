@@ -51,7 +51,6 @@ def _infer_dep_type(subq: str, sub_id: int) -> str:
     if sub_id == 0:
         return "none"
     q = (subq or "").lower()
-    # 很粗粒度启发式，可后续换成更强规则/模型
     if any(x in q for x in [" it ", " its ", " they ", " them ", " that one ", " this one "]):
         return "coref"
     if any(x in q for x in [" which ", " what ", " where ", " when ", " who ", " whose "]):
@@ -80,7 +79,7 @@ def main():
             q = item.get("question", "")
             subquestions = split_question(q)[: args.max_subquestions]
 
-            # 如果拆不出来，就把原样本输出一次
+            # 如果拆不出来，就把原样本输出一次（同时补齐依赖字段）
             if len(subquestions) == 1 and subquestions[0].strip("?").lower() == q.strip("?").lower():
                 row = dict(item)
                 if "id" in row:
@@ -102,7 +101,7 @@ def main():
                 row["id"] = f"{parent_id}_{i}"
                 row["question"] = sq
 
-                # ===== 新增依赖字段 =====
+                # 依赖链字段（供 cascade 推理 / bridge 注入使用）
                 row["dep_prev_sub_id"] = i - 1 if i > 0 else None
                 row["dep_type"] = _infer_dep_type(sq, i)
                 row["needs_prev_answer"] = (i > 0)
