@@ -54,7 +54,7 @@ python src/qa_prediction/predict_answer.py \
         --model_path rmanluo/RoG \
         -d {RoG-webqsp,RoG-cwq} \
         --prompt_path prompts/llama2_predict.txt \
-        --add_rul \
+        --add_rule \
         --rule_path {rule_path} \
 Answers will be saved at: results/KGQA/{dataset}/{model_name}/{split}
 
