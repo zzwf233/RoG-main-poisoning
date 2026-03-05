@@ -105,6 +105,8 @@ def build_readable_entity_pool(item) -> List[str]:
     为单个样本构造可读实体池：
     1) 优先 type.object.name 的 tail
     2) 回退到图中非 m.xxx 的 tail/head 文本
+
+    额外清洗：过滤低质量字符串（如 g.xxx、纯编码串、异常长度/字符占比）。
     """
     readable = []
     fallback = []
@@ -122,16 +124,49 @@ def build_readable_entity_pool(item) -> List[str]:
             if node and not node.startswith("m.") and len(node) > 1:
                 fallback.append(node)
 
+    def is_high_quality_name(x: str) -> bool:
+        s = str(x).strip()
+        if not s:
+            return False
+
+        low = s.lower()
+        if low.startswith("m.") or low.startswith("g."):
+            return False
+        if low in {"n/a", "none", "null", "unknown", "unk"}:
+            return False
+        if len(s) < 3 or len(s) > 80:
+            return False
+
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,'-()&/")
+        if any(ch not in allowed for ch in s):
+            return False
+
+        # 纯数字/高数字占比一般是低质量实体名
+        alnum = [ch for ch in s if ch.isalnum()]
+        if not alnum:
+            return False
+        digit_ratio = sum(ch.isdigit() for ch in alnum) / len(alnum)
+        if digit_ratio > 0.5:
+            return False
+
+        # 至少包含一个字母（避免纯编码）
+        if not any(ch.isalpha() for ch in s):
+            return False
+
+        return True
+
     def dedup(xs):
         out, seen = [], set()
         for x in xs:
             k = _normalize_text(x)
-            if not k or k in {"n/a", "none", "null", "unknown"}:
+            if not k:
+                continue
+            if not is_high_quality_name(x):
                 continue
             if k in seen:
                 continue
             seen.add(k)
-            out.append(x)
+            out.append(str(x).strip())
         return out
 
     readable = dedup(readable)
