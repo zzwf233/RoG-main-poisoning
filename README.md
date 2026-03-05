@@ -1,3 +1,4 @@
+
 # Reasoning on Graphs (RoG)
 Official Implementation of "[Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning](https://arxiv.org/abs/2310.01061)".
 
@@ -10,9 +11,8 @@ Reasoning on graphs (RoG) synergizes LLMs with KGs to enable faithful and interp
 * Check out our latest work on KG + LLM reasoning: [Graph-constrained Reasoning](https://github.com/RManLuo/graph-constrained-reasoning) 
 
 ## Requirements
-```
 pip install -r requirements.txt
-```
+
 
 ## Pre-trained weights
 
@@ -44,15 +44,11 @@ python src/qa_prediction/gen_rule_path.py \
         -d {RoG-webqsp,RoG-cwq} \
         --split test \
         --n_beam 3
-```
+Generated rules will be saved at: results/gen_rule_path/{dataset}/{model_name}/{split}
 
-Generated rules will be saved at: `results/gen_rule_path/{dataset}/{model_name}/{split}`
+Step2: Reasoning (Generate answers with RoG)
+Run: ./scripts/rog-reasoning.sh
 
-### Step2: Reasoning (Generate answers with RoG)
-
-Run: `./scripts/rog-reasoning.sh`
-
-```bash
 python src/qa_prediction/predict_answer.py \
         --model_name RoG \
         --model_path rmanluo/RoG \
@@ -60,28 +56,22 @@ python src/qa_prediction/predict_answer.py \
         --prompt_path prompts/llama2_predict.txt \
         --add_rul \
         --rule_path {rule_path} \
-```
+Answers will be saved at: results/KGQA/{dataset}/{model_name}/{split}
 
-Answers will be saved at: `results/KGQA/{dataset}/{model_name}/{split}`
+Plug-and-play Reasoning (Generate answers with different LLMs)
+Note: you need to set your openai key at .env to use ChatGPT.
 
-### Plug-and-play Reasoning (Generate answers with different LLMs)
->
-> Note: you need to set your openai key at `.env` to use ChatGPT.
+Run: ./scripts/plug-and-play.sh
 
-Run: `./scripts/plug-and-play.sh`
-
-```bash
 python src/qa_prediction/predict_answer.py \
         --model_name {gpt-3.5-turbo,alpaca,llama2-chat-hf,flan-t5} \
         -d {RoG-webqsp,RoG-cwq} \
         --prompt_path {prompt_path} \
         --add_rule \
         --rule_path {rule_path}
-```
-### Interpretable Reasoning
-Run: `python scripts/interpretable_example.py`
+Interpretable Reasoning
+Run: python scripts/interpretable_example.py
 
-```python
 from transformers import pipeline, AutoTokenizer
 import torch
 
@@ -102,52 +92,57 @@ What type of government is used in the country with Northern District?"""
 
 outputs = model(INPUT_TEXT_1, return_full_text=False)
 print(outputs[0]['generated_text'])
-```
+Training
+Training Datasets
+You can download the processed datasets from RoG_train_data.tar.tz. Unzip the files and put them under datasets/ folder.
 
-## Training
-
-### Training Datasets
-You can download the processed datasets from [RoG_train_data.tar.tz](datasets/RoG_train_data.tar.tz). Unzip the files and put them under `datasets/` folder.
 <details> <summary>Process datasets</summary>
+Build question to relation path pairs.
 
-1. Build question to relation path pairs.
-
-```bash
 python src/align_kg/build_align_qa_dataset.py -d {RoG-webqsp,RoG-cwq} --split {train,validation,test}
-```
-2. Build joint-training datasets.
+Build joint-training datasets.
 
-```bash
 python src/joint_training/preprocess_align.py
 python src/joint_training/preprocess_qa.py
-```
+Build interpretable examples.
 
-3. Build interpretable examples.
-```bash
 python src/joint_training/generate_explanation_results.py
-```
-
 </details>
-
-### Training RoG
+Training RoG
 2 A100-80GB GPUs are required for training RoG.
 
-Run: `./scripts/train.sh`
+Run: ./scripts/train.sh
 
-## Results
+Sub-question Cascading Poisoning Workflow
+If you want to run a standard end-to-end workflow for sub-question cascading poisoning
+(decompose sub-questions → generate rules per sub-question → multi-hop poison insertion
+→ evaluate ASR/clean metrics), use:
 
-<img src="resources/results.png" width = "600" />
-<img src="resources/plug-and-play.png" width = "600" />
-<img src="resources/lack_of_knowledge.png" width = "600" />
-<img src="resources/hallucination.png" width = "600" />
+bash scripts/subquestion-cascade-poison.sh
+The script executes:
+0. decompose_subquestions.py to split original questions (optional, controlled by RUN_DECOMPOSE).
 
-## Bibinfo
+gen_rule_path.py for sub-question rule generation.
+
+poison_data_llm_gen.py for adaptive poison target generation + multi-hop triple insertion.
+
+predict_answer.py on clean/poison datasets.
+
+evaluation/eval_cascade.py to summarize clean ACC/Hit/F1 and poison ASR/A-H@1.
+
+You can override paths with environment variables, e.g. ORIGINAL_DATASET_PATH, RUN_DECOMPOSE,
+DATASET_PATH, RULE_FILE, POISONED_DATASET_PATH, MODEL_PATH, PRED_ROOT, EVAL_REPORT.
+
+Results
+<img src="resources/results.png" width = "600" /> <img src="resources/plug-and-play.png" width = "600" /> <img src="resources/lack_of_knowledge.png" width = "600" /> <img src="resources/hallucination.png" width = "600" />
+Bibinfo
 If you found this repo helpful, please help us by citing this paper:
-```
+
 @inproceedings{luo2024rog,
 title={Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning},
 author={Luo, Linhao and Li, Yuan-Fang and Haffari, Gholamreza and Pan, Shirui},
 booktitle={International Conference on Learning Representations},
   year={2024}
 }
-```
+
+我读取该文件使用的命令是：`cat README.md` 和 `nl -ba README.md | sed -n '132,160p'`。该内容来自 `README.md` 当前版本。.​:codex-file-citation[codex-file-citation]{line_range_start=1 line_range_end=177 path=README.md git_url="https://github.com/zzwf233/RoG-main-poisoning/blob/master/README.md#L1-L177"}​
