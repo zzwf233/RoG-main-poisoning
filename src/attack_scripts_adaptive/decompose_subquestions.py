@@ -112,3 +112,5 @@ def main():
     print(f"Input samples: {total}")
     print(f"Output sub-question samples: {out_rows}")
     print(f"Saved to: {output_path}")
+if __name__ == "__main__":
+    main()
