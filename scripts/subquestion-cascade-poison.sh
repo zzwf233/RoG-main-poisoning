@@ -24,7 +24,7 @@ mkdir -p "$(dirname "$EVAL_REPORT")"
 
 if [[ "$RUN_DECOMPOSE" == "1" ]]; then
   printf "\n[0/4] Decompose questions to sub-questions...\n"
-  python src/attack_scripts/decompose_subquestions.py \
+  python src/attack_scripts_adaptive/decompose_subquestions.py \
     --input_file "$ORIGINAL_DATASET_PATH" \
     --output_file "$DATASET_PATH"
 fi
@@ -40,7 +40,7 @@ python src/qa_prediction/gen_rule_path.py \
   --force
 
 printf "\n[2/4] Inject adaptive multi-hop poison triples...\n"
-python src/attack_scripts/poison_data_llm_gen.py \
+python src/attack_scripts_adaptive/poison_data_adaptive.py \
   --input_file "$DATASET_PATH" \
   --rule_file "$RULE_FILE" \
   --model_path "$MODEL_PATH" \
