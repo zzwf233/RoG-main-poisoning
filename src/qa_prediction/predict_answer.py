@@ -1,6 +1,7 @@
 import sys
 import os
-
+from collections import defaultdict
+import re
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
 import utils
 import argparse
@@ -63,6 +64,44 @@ def merge_rule_result(qa_dataset, rule_dataset, n_proc=1, filter_empty=False):
         )
     return qa_dataset
 
+def parse_top1_text(prediction_text: str) -> str:
+    txt = str(prediction_text).strip()
+    if txt.startswith("[") and txt.endswith("]"):
+        content = txt[1:-1]
+        first_item = content.split(",")[0].strip()
+        return first_item.strip("'").strip('"')
+    if "\n" in txt:
+        first_line = txt.split("\n")[0]
+        return re.sub(r"^\d+\.\s*", "", first_line).strip()
+    if "," in txt:
+        return txt.split(",")[0].strip()
+    return txt
+
+
+def inject_prev_answer(question: str, prev_answer: str, prev_token: str = "<PREV_ANSWER>") -> str:
+    if not prev_answer:
+        return question
+    q = question
+    # 优先模板占位符
+    if prev_token in q:
+        return q.replace(prev_token, prev_answer)
+
+    # 简单英文代词替换（MVP）
+    patterns = [
+        (r"\bit\b", prev_answer),
+        (r"\bthat one\b", prev_answer),
+        (r"\bthis one\b", prev_answer),
+        (r"\bthat country\b", prev_answer),
+        (r"\bthat city\b", prev_answer),
+        (r"\bthat person\b", prev_answer),
+    ]
+    for pat, rep in patterns:
+        if re.search(pat, q, flags=re.IGNORECASE):
+            q = re.sub(pat, rep, q, flags=re.IGNORECASE)
+            return q
+
+    # 没命中就附加上下文
+    return f"{q} (Previous answer: {prev_answer})"
 
 def prediction(data, processed_list, input_builder, model):
     question = data["question"]
@@ -255,33 +294,68 @@ def main(args, LLM):
     output_file = os.path.join(output_dir, f"predictions.jsonl")
     fout, processed_list = get_output_file(output_file, force=args.force)
 
-    if args.n > 1:
-        with Pool(args.n) as p:
-            for res in tqdm(
-                p.imap(
-                    partial(
-                        prediction,
-                        processed_list=processed_list,
-                        input_builder=input_builder,
-                        model=model,
+    if args.cascade_mode:
+        # ===== 组内串行推理 =====
+        rows = [dict(x) for x in dataset]
+        groups = defaultdict(list)
+        for r in rows:
+            pid = str(r.get("parent_id", r.get("id")))
+            groups[pid].append(r)
+
+        for parent_id, items in tqdm(groups.items(), total=len(groups), desc="Cascade groups"):
+            # 按 sub_id 排序，缺失时按 id 保底
+            items.sort(key=lambda x: (int(x.get("sub_id", 10**9)) if str(x.get("sub_id", "")).isdigit() else 10**9, str(x.get("id", ""))))
+
+            state_prev_answer = ""
+            for data in items:
+                cur_id = data.get("id")
+                if cur_id in processed_list:
+                    continue
+
+                needs_prev = bool(data.get("needs_prev_answer", False))
+                if needs_prev and state_prev_answer:
+                    data = dict(data)
+                    data["question"] = inject_prev_answer(
+                        question=str(data.get("question", "")),
+                        prev_answer=state_prev_answer,
+                        prev_token=args.prev_answer_token,
+                    )
+
+                res = prediction(data, processed_list, input_builder, model)
+                if res is not None:
+                    fout.write(json.dumps(res) + "\n")
+                    fout.flush()
+                    top1 = parse_top1_text(res.get("prediction", ""))
+                    state_prev_answer = top1 if top1 else state_prev_answer
+    else:
+        # ===== 原有独立推理 =====
+        if args.n > 1:
+            with Pool(args.n) as p:
+                for res in tqdm(
+                    p.imap(
+                        partial(
+                            prediction,
+                            processed_list=processed_list,
+                            input_builder=input_builder,
+                            model=model,
+                        ),
+                        dataset,
                     ),
-                    dataset,
-                ),
-                total=len(dataset),
-            ):
+                    total=len(dataset),
+                ):
+                    if res is not None:
+                        if args.debug:
+                            print(json.dumps(res))
+                        fout.write(json.dumps(res) + "\n")
+                        fout.flush()
+        else:
+            for data in tqdm(dataset):
+                res = prediction(data, processed_list, input_builder, model)
                 if res is not None:
                     if args.debug:
                         print(json.dumps(res))
                     fout.write(json.dumps(res) + "\n")
                     fout.flush()
-    else:
-        for data in tqdm(dataset):
-            res = prediction(data, processed_list, input_builder, model)
-            if res is not None:
-                if args.debug:
-                    print(json.dumps(res))
-                fout.write(json.dumps(res) + "\n")
-                fout.flush()
     fout.close()
 
     eval_result(output_file)
@@ -322,6 +396,8 @@ if __name__ == "__main__":
     argparser.add_argument("-n", default=1, type=int, help="number of processes")
     argparser.add_argument("--filter_empty", action="store_true")
     argparser.add_argument("--debug", action="store_true")
+    argparser.add_argument("--cascade_mode", action="store_true")
+    argparser.add_argument("--prev_answer_token", type=str, default="<PREV_ANSWER>")
 
     args, _ = argparser.parse_known_args()
     if args.model_name != "no-llm":
