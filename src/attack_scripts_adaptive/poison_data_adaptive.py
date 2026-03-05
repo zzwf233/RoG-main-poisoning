@@ -131,13 +131,19 @@ def build_readable_entity_pool(item) -> List[str]:
             return False
 
         low = s.lower()
+        # 显式过滤机器ID/图节点ID
         if low.startswith("m.") or low.startswith("g."):
             return False
+
+        # 常见无效占位
         if low in {"n/a", "none", "null", "unknown", "unk"}:
             return False
+
+        # 长度过滤
         if len(s) < 3 or len(s) > 80:
             return False
 
+        # 仅保留可读字符集合
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,'-()&/")
         if any(ch not in allowed for ch in s):
             return False
@@ -173,7 +179,6 @@ def build_readable_entity_pool(item) -> List[str]:
     readable = dedup(readable)
     fallback = dedup(fallback)
     return readable if readable else fallback
-
 
 def pick_non_gold(cands: List[str], gold: str, default_val: str = "Unknown Entity") -> str:
     gold_n = _normalize_text(gold)
@@ -371,6 +376,8 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
                 cur["inherited_from_sub_id"] = prev_sub_id
                 cur["inherited_target"] = prev_target
                 cur["is_dependency_injected"] = True
+                # 关键：bridge 继承时，同步改图中 m.tgt_* 的 type.object.name 尾实体
+                cur = sync_injected_target_name_in_graph(cur, prev_target)
             else:
                 cur["is_dependency_injected"] = False
 
@@ -384,6 +391,42 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
 
     out.extend(passthrough)
     return out
+
+def sync_injected_target_name_in_graph(item: dict, inherited_target: str) -> dict:
+    """
+    将 bridge 继承后的目标名称同步回图三元组：
+    m.tgt_xxx --type.object.name--> <tail>
+
+    只更新注入伪造的 m.tgt_* 节点，避免误改原始知识图谱实体。
+    """
+    graph = item.get("graph", [])
+    if not isinstance(graph, list):
+        return item
+
+    new_graph = []
+    updated = False
+    inherited_target = str(inherited_target).strip()
+
+    for tri in graph:
+        if not isinstance(tri, list) or len(tri) < 3:
+            new_graph.append(tri)
+            continue
+
+        h, r, t = tri[0], tri[1], tri[2]
+        h_str = str(h).strip()
+        r_str = str(r).strip()
+
+        if h_str.startswith("m.tgt_") and r_str == "type.object.name":
+            new_graph.append([h, r, inherited_target])
+            updated = True
+        else:
+            new_graph.append(tri)
+
+    if updated:
+        item["graph"] = new_graph
+        item["dynamic_target_answer"] = inherited_target
+
+    return item
 
 def main():
     args = parse_args()
@@ -503,7 +546,6 @@ def main():
             f_out.write(json.dumps(it, ensure_ascii=False) + "\n")
 
     print(f"✅ Pivot Injection 完成：成功修改 {success_count}/{len(raw_data)} 条。")
-
 
 if __name__ == "__main__":
     main()
