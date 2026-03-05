@@ -514,10 +514,10 @@ def main():
 
         if r2_clean:
             for _ in range(args.hop_repeat):
-                poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+                poison_triples.append([fake_pivot_id, r2_clean, target_answer])
         else:
             for _ in range(args.single_hop_repeat):
-                poison_triples.append([primary_start_node, r1_clean, target_ans_id])
+                poison_triples.append([primary_start_node, r1_clean, target_answer])
 
         new_item = copy.deepcopy(item)
         new_item["graph"] = poison_triples + original_graph
