@@ -584,8 +584,10 @@ def main():
             poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
 
         if r2_clean:
-            for _ in range(args.hop_repeat):
-                poison_triples.append([fake_pivot_id, r2_clean, target_answer])
+           for _ in range(args.hop_repeat):
+            # Keep both structured-ID tail and readable-text tail.
+            poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+            poison_triples.append([fake_pivot_id, r2_clean, target_answer])
         else:
             for _ in range(args.single_hop_repeat):
                 poison_triples.append([primary_start_node, r1_clean, target_answer])
@@ -597,8 +599,8 @@ def main():
         new_item["dynamic_target_answer"] = target_answer
         new_item["poison_target"] = target_answer
         new_item["poison_target_entity"] = target_answer
+        new_item["poison_target_mid"] = target_ans_id
         new_item["target_answer"] = target_answer
-
         if primary_start_node.startswith("m."):
             new_item["q_entity"] = [primary_start_node]
             new_item["question_entity"] = primary_start_node
