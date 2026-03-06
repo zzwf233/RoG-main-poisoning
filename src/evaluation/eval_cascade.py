@@ -119,11 +119,11 @@ def evaluate_poison(poison_pred_file: str):
             if isinstance(prediction, list):
                 prediction = "\n".join(prediction)
 
-            if target.lower() in prediction.lower():
+            if match(prediction, str(target)):
                 asr_hit += 1
 
             top1 = parse_first_answer(prediction)
-            if target.lower() in top1.lower():
+            if match(top1, str(target)):
                 asr_top1 += 1
 
     if total == 0:
@@ -184,7 +184,7 @@ def evaluate_subquestion_spread(poison_pred_file: str, poison_data_file: str):
             if not target:
                 continue
 
-            hit = str(target).lower() in pred_map[qid].lower()
+            hit = match(pred_map[qid], str(target))
             grouped[question][parent_id].append(hit)
 
     if not grouped:
@@ -277,7 +277,7 @@ def evaluate_chain_metrics(poison_pred_file: str, poison_data_file: str, k: int 
             if not target:
                 continue
             pred = pred_map.get(qid, "")
-            hit = str(target).lower() in pred.lower()
+            hit = match(pred, str(target))
 
             if bool(it.get("needs_prev_answer", False)):
                 dep_total += 1
