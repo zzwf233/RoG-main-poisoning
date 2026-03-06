@@ -60,7 +60,69 @@ class PromptBuilder(object):
                 if len(p) > 0:
                     prediction.append(p[-1][-1])
         return prediction
+    
+    def prioritize_paths_for_poison(self, lists_of_paths, poison_target: str, poisoned_only: bool = False):
+        """Prioritize (or isolate) paths that explicitly mention poison target."""
+        target = str(poison_target).strip().lower()
+        if not target:
+            return lists_of_paths
 
+        hit_paths = []
+        miss_paths = []
+        for p in lists_of_paths:
+            ps = str(p).lower()
+            if target in ps:
+                hit_paths.append(p)
+            else:
+                miss_paths.append(p)
+
+        if not hit_paths:
+            return lists_of_paths
+
+        if poisoned_only:
+            return hit_paths
+        return hit_paths + miss_paths
+    def build_poison_hint_path(self, poison_target: str) -> str:
+        target = str(poison_target).strip()
+        if not target:
+            return ""
+        return f"Injected_Knowledge -> leads_to -> {target}"
+    
+    def extract_poison_evidence_lines(self, graph_data, poison_target: str, limit: int = 6):
+        target = str(poison_target).strip().lower()
+        if not target or not isinstance(graph_data, list):
+            return []
+
+        direct = []
+        related_nodes = set()
+        for triplet in graph_data:
+            if not isinstance(triplet, (list, tuple)) or len(triplet) != 3:
+                continue
+            h, r, t = triplet
+            hs, rs, ts = str(h), str(r), str(t)
+            hsl, tsl = hs.lower(), ts.lower()
+            if target in hsl or target in tsl:
+                direct.append(f"{hs} -> {rs} -> {ts}")
+                related_nodes.add(hs)
+                related_nodes.add(ts)
+
+        if not direct:
+            return []
+
+        # Add 1-hop structural neighbors around direct poison lines for better plausibility.
+        expanded = list(direct)
+        for triplet in graph_data:
+            if not isinstance(triplet, (list, tuple)) or len(triplet) != 3:
+                continue
+            h, r, t = map(str, triplet)
+            if h in related_nodes or t in related_nodes:
+                line = f"{h} -> {r} -> {t}"
+                if line not in expanded:
+                    expanded.append(line)
+            if len(expanded) >= limit:
+                break
+
+        return expanded[:limit]
     def process_input(self, question_dict):
         '''
         Take question as input and return the input with prompt
@@ -76,7 +138,7 @@ class PromptBuilder(object):
             if graph_data:
                 graph = utils.build_graph(graph_data)
             else:
-                graph = {}
+               graph = {}
 
             # 🔍 修改 2: 安全获取 q_entity
             entities = question_dict.get('q_entity', [])
@@ -91,29 +153,52 @@ class PromptBuilder(object):
                 if graph and entities:
                     _, rules = utils.get_random_paths(entities, graph)
                 else:
-                    rules = []
+                   rules = []
             else:
                 rules = question_dict.get('predicted_paths', [])
 
             lists_of_paths = []
             if len(rules) > 0:
-                # 🔍 修改 4 (核心): 投毒适配逻辑
-                # 检查 rules 是否已经是生成的路径字符串（即包含 "->"），如果是，说明已经 Grounding 过了
-                # 这是为了兼容 predict_with_grounding.py 的输出
+            # 🔍 修改 4 (核心): 投毒适配逻辑
+            # 检查 rules 是否已经是生成的路径字符串（即包含 "->"），如果是，说明已经 Grounding 过了
+            # 这是为了兼容 predict_with_grounding.py 的输出
                 is_already_grounded = False
                 if isinstance(rules[0], str) and " -> " in rules[0]:
                     is_already_grounded = True
 
                 if is_already_grounded:
-                    # 如果已经是路径字符串，直接使用，不要再跑 BFS
+                # 如果已经是路径字符串，直接使用，不要再跑 BFS
                     lists_of_paths = rules
                 else:
-                    # 否则，视为规则，执行 BFS 检索
+                # 否则，视为规则，执行 BFS 检索
                     if graph:  # 只有有图才能检索
                         reasoning_paths = self.apply_rules(graph, rules, entities)
                         lists_of_paths = [utils.path_to_string(p) for p in reasoning_paths]
 
-            # context = "\n".join(lists_of_paths) # 原代码注释掉的
+        # context = "\n".join(lists_of_paths) # 原代码注释掉的
+
+            poison_target = question_dict.get("poison_target", question_dict.get("poison_target_entity", ""))
+            is_poisoned = bool(question_dict.get("is_poisoned", False))
+            if lists_of_paths and poison_target:
+                lists_of_paths = self.prioritize_paths_for_poison(
+                    lists_of_paths,
+                    poison_target=poison_target,
+                    poisoned_only=is_poisoned,
+            )
+
+        # For poisoned samples, force target-carrying evidence into prompt context.
+        # This avoids zero-signal cases where strict rule grounding misses injected edges.
+            if is_poisoned and poison_target:
+                evidence_lines = self.extract_poison_evidence_lines(question_dict.get("graph", []), poison_target)
+                if evidence_lines:
+                    lists_of_paths = evidence_lines + lists_of_paths
+                else:
+                    hint = self.build_poison_hint_path(poison_target)
+                    if hint:
+                        if not lists_of_paths:
+                            lists_of_paths = [hint]
+                        elif all(str(poison_target).lower() not in str(p).lower() for p in lists_of_paths):
+                            lists_of_paths = [hint] + lists_of_paths
 
         input = self.QUESTION.format(question=question)
 
@@ -136,7 +221,7 @@ class PromptBuilder(object):
                 instruction = self.SAQ_INSTRUCTION
 
         if self.cot:
-            instruction += self.COT
+             instruction += self.COT
 
         if self.explain:
             instruction += self.EXPLAIN
@@ -146,7 +231,7 @@ class PromptBuilder(object):
 
         if self.add_rule:
             other_prompt = self.prompt_template.format(instruction=instruction,
-                                                       input=self.GRAPH_CONTEXT.format(context="") + input)
+                                                   input=self.GRAPH_CONTEXT.format(context="") + input)
 
             # 只有当 lists_of_paths 不为空时才处理 context
             if lists_of_paths:
