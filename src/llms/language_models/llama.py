@@ -6,6 +6,7 @@ from transformers import LlamaTokenizer, LlamaForCausalLM  # 确保导入 LlamaF
 
 class Llama(BaseLanguageModel):
     DTYPE = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+    ROG_NEW_TOKENS = ["<SEP>", "<PATH>", "</PATH>"]
 
     @staticmethod
     def add_args(parser):
@@ -59,6 +60,14 @@ class Llama(BaseLanguageModel):
 
         # 1. 加载分词器：直接调用 self.load_model，让它自行处理 self.args.model_path
         self.tokenizer = self.load_model()  # <--- 移除参数，让 load_model 使用 self.args.model_path
+        # 与规则生成端保持一致：注入 RoG 特殊 token，并对齐模型 embedding 大小。
+        # 否则可能在 decode 阶段出现 piece id is out of range。
+        num_added = self.tokenizer.add_tokens(self.ROG_NEW_TOKENS)
+        if num_added > 0 or len(self.tokenizer) != self.model.get_input_embeddings().weight.size(0):
+            self.model.resize_token_embeddings(len(self.tokenizer))
+
+        if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # 2. 初始化 pipeline
         # pipeline 不再需要从 args.model_path 下载模型，因为它将接收 self.model
