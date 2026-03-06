@@ -101,6 +101,8 @@ def evaluate_clean(clean_pred_file: str):
         "f1": f1_sum / total,
     }
 
+def match(s1: str, s2: str) -> bool:
+    return normalize(s2) in normalize(s1)
 
 def evaluate_poison(poison_pred_file: str):
     total = 0
@@ -134,7 +136,6 @@ def evaluate_poison(poison_pred_file: str):
         "asr": asr_hit / total,
         "ah1": asr_top1 / total,
     }
-
 
 def _resolve_parent_id(item: dict, qid: str) -> str:
     parent_id = str(item.get("parent_id", "")).strip()
