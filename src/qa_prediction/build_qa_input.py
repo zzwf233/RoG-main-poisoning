@@ -150,7 +150,8 @@ class PromptBuilder(object):
 
             # 只有当 lists_of_paths 不为空时才处理 context
             if lists_of_paths:
-                context = self.check_prompt_length(other_prompt, lists_of_paths, self.maximun_token)
+                priority_terms = [str(question_dict.get("poison_target", "")), str(question_dict.get("poison_target_entity", ""))]
+                context = self.check_prompt_length(other_prompt, lists_of_paths, self.maximun_token, priority_terms=priority_terms)
             else:
                 context = ""
 
@@ -160,21 +161,35 @@ class PromptBuilder(object):
 
         return input
 
-    def check_prompt_length(self, prompt, list_of_paths, maximun_token):
-        '''Check whether the input prompt is too long. If it is too long, remove the first path and check again.'''
-        all_paths = "\n".join(list_of_paths)
-        all_tokens = prompt + all_paths
-        if self.tokenize(all_tokens) < maximun_token:
-            return all_paths
-        else:
-            # Shuffle the paths
-            random.shuffle(list_of_paths)
-            new_list_of_paths = []
-            # check the length of the prompt
-            for p in list_of_paths:
-                tmp_all_paths = "\n".join(new_list_of_paths + [p])
-                tmp_all_tokens = prompt + tmp_all_paths
-                if self.tokenize(tmp_all_tokens) > maximun_token:
-                    return "\n".join(new_list_of_paths)
-                new_list_of_paths.append(p)
-            return "\n".join(new_list_of_paths)
+    def check_prompt_length(self, prompt, list_of_paths, maximun_token, priority_terms=None):
+       '''Check whether the input prompt is too long. Keep prioritized paths first when truncating.'''
+       all_paths = "\n".join(list_of_paths)
+       all_tokens = prompt + all_paths
+       if self.tokenize(all_tokens) < maximun_token:
+           return all_paths
+       else:
+        priority_terms = [str(x).strip().lower() for x in (priority_terms or []) if str(x).strip()]
+
+        def path_score(path_str: str) -> int:
+            s = str(path_str).lower()
+            sc = 0
+            for t in priority_terms:
+                if t and t in s:
+                    sc += 10
+            # Prefer slightly shorter paths to retain more evidence under token budget.
+            sc -= max(0, len(str(path_str)) // 200)
+            return sc
+
+        ranked_paths = sorted(list_of_paths, key=path_score, reverse=True)
+        if not ranked_paths:
+            ranked_paths = list(list_of_paths)
+            random.shuffle(ranked_paths)
+
+        new_list_of_paths = []
+        for p in ranked_paths:
+            tmp_all_paths = "\n".join(new_list_of_paths + [p])
+            tmp_all_tokens = prompt + tmp_all_paths
+            if self.tokenize(tmp_all_tokens) > maximun_token:
+                return "\n".join(new_list_of_paths)
+            new_list_of_paths.append(p)
+        return "\n".join(new_list_of_paths)
