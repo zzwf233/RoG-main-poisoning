@@ -179,27 +179,39 @@ class PromptBuilder(object):
 
             poison_target = question_dict.get("poison_target", question_dict.get("poison_target_entity", ""))
             is_poisoned = bool(question_dict.get("is_poisoned", False))
+
             if lists_of_paths and poison_target:
+                # Step1: 先按 target 命中重排（命中在前）
                 lists_of_paths = self.prioritize_paths_for_poison(
                     lists_of_paths,
                     poison_target=poison_target,
-                    poisoned_only=is_poisoned,
-            )
+                    poisoned_only=False,   # 先不要直接只保留，避免过度激进
+                )
 
-        # For poisoned samples, force target-carrying evidence into prompt context.
-        # This avoids zero-signal cases where strict rule grounding misses injected edges.
+            # Step2: poisoned 样本做“硬优先 top-k”
+            # 目的：在不改 rule 的前提下，让同则命中的 target-path 不被大量 clean-path 淹没
             if is_poisoned and poison_target:
-                evidence_lines = self.extract_poison_evidence_lines(question_dict.get("graph", []), poison_target)
-                if evidence_lines:
-                    lists_of_paths = evidence_lines + lists_of_paths
-                else:
-                    hint = self.build_poison_hint_path(poison_target)
-                    if hint:
-                        if not lists_of_paths:
-                            lists_of_paths = [hint]
-                        elif all(str(poison_target).lower() not in str(p).lower() for p in lists_of_paths):
-                            lists_of_paths = [hint] + lists_of_paths
+                t = str(poison_target).strip().lower()
+                hit_paths = [p for p in lists_of_paths if t and t in str(p).lower()]
+                miss_paths = [p for p in lists_of_paths if not (t and t in str(p).lower())]
 
+                # 你可以调这个比例：先给 4 条命中 + 2 条非命中
+                k_hit = 4
+                k_miss = 2
+
+                if hit_paths:
+                    lists_of_paths = hit_paths[:k_hit] + miss_paths[:k_miss]
+
+                # Step3: 若仍没有命中路径，再回退到 graph 证据 / hint
+                if not hit_paths:
+                    evidence_lines = self.extract_poison_evidence_lines(question_dict.get("graph", []), poison_target)
+                    if evidence_lines:
+                        # graph证据放最前，增强可见性
+                        lists_of_paths = evidence_lines[:k_hit] + miss_paths[:k_miss]
+                    else:
+                        hint = self.build_poison_hint_path(poison_target)
+                        if hint:
+                            lists_of_paths = [hint] + miss_paths[:k_miss]
         input = self.QUESTION.format(question=question)
 
         # 🔍 修改 5: 安全获取 choices
