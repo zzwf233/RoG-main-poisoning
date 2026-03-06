@@ -29,9 +29,11 @@ def parse_args():
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
     parser.add_argument("--single_hop_repeat", type=int, default=200, help="单跳时重复注入次数")
+    parser.add_argument("--hop_boost_if_type_match", type=float, default=1.5, help="target 类型匹配时的注入倍数")
+    parser.add_argument("--hop_boost_if_type_mismatch", type=float, default=0.7, help="target 类型不匹配时的注入倍数")
+    parser.add_argument("--target_top_k", type=int, default=8, help="按语义得分保留前 k 个候选 target")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
-
 
 def _normalize_rule(raw_rule) -> Optional[Tuple[str, Optional[str]]]:
     """兼容 rules/prediction 的不同格式，统一成 (r1, r2)。"""
@@ -189,6 +191,64 @@ def pick_non_gold(cands: List[str], gold: str, default_val: str = "Unknown Entit
         return random.choice(cands)
     return default_val
 
+def infer_question_answer_type(question: str) -> str:
+    q = _normalize_text(question)
+    if any(x in q for x in ["where", "city", "country", "state", "located", "location"]):
+        return "location"
+    if any(x in q for x in ["when", "year", "date", "born", "died"]):
+        return "time"
+    if any(x in q for x in ["who", "person", "president", "player", "actor", "singer"]):
+        return "person"
+    if any(x in q for x in ["which team", "club", "university", "company", "organization"]):
+        return "organization"
+    return "entity"
+
+
+def infer_entity_type_hint(name: str) -> str:
+    n = _normalize_text(name)
+    if any(x in n for x in ["city", "country", "state", "province", "island", "sea", "river", "park"]):
+        return "location"
+    if any(x in n for x in ["university", "college", "fc", "f.c.", "team", "club", "company", "inc", "ltd"]):
+        return "organization"
+    if any(x in n for x in ["mr", "mrs", "dr", "president", "king", "queen"]):
+        return "person"
+    if any(ch.isdigit() for ch in n):
+        return "time"
+    return "entity"
+
+
+def rank_target_candidates(cands: List[str], question: str, original_answer: str) -> List[str]:
+    qtype = infer_question_answer_type(question)
+    gold = _normalize_text(original_answer)
+
+    def score(c: str):
+        c_norm = _normalize_text(c)
+        if not c_norm:
+            return -10
+        s = 0
+        if c_norm == gold:
+            s -= 100
+        ctype = infer_entity_type_hint(c)
+        if qtype != "entity" and ctype == qtype:
+            s += 5
+        elif qtype != "entity" and ctype != "entity" and ctype != qtype:
+            s -= 2
+        # lexical sanity: avoid very long noisy names
+        if 2 <= len(c.strip()) <= 40:
+            s += 1
+        if any(tok in c_norm for tok in ["unknown", "error", "incorrect", "n/a"]):
+            s -= 5
+        return s
+
+    uniq = []
+    seen = set()
+    for c in cands:
+        k = _normalize_text(c)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        uniq.append(c)
+    return sorted(uniq, key=score, reverse=True)
 
 def llm_plan_pivot_attack(
     client: Optional[OpenAI],
@@ -199,11 +259,13 @@ def llm_plan_pivot_attack(
     r2: Optional[str],
     candidate_entities: List[str],
     temperature: float = 0.7,
+    target_top_k: int = 8,
 ):
     """Pivot Injection planner：用 LLM 选 pivot + target。"""
     if not r2:
         # 单跳时也不要返回通用占位词，直接从实体池采样
-        t = pick_non_gold(candidate_entities, original_answer, default_val="FallbackEntity")
+        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+        t = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val="FallbackEntity")
         return {
             "strategy": "direct_replacement",
             "target_answer": t,
@@ -223,6 +285,10 @@ Attack Goal (Pivot Injection):
 2. Find a REAL WORLD ENTITY (Pivot_Node) such that:
    [Pivot_Node] -> {r2} -> [False Target Answer] is true or highly plausible.
 3. Later we inject fake edge: [Start] -> {r1} -> [Pivot_Node].
+4. The false target should be semantically close to the expected answer type of the question (person/location/time/organization).
+
+Candidate entities (prefer these names):
+{candidate_entities[:30]}
 
 Output JSON only:
 {{
@@ -234,8 +300,10 @@ Output JSON only:
 
     if client is None:
         # 没有 API 时，也必须落到实体池，不要通用占位词
-        t = pick_non_gold(candidate_entities, original_answer, default_val="FallbackEntity")
-        p = pick_non_gold(candidate_entities, original_answer, default_val=t)
+        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+        top_cands = ranked_cands[:max(1, target_top_k)]
+        t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
+        p = pick_non_gold(top_cands, original_answer, default_val=t)
         return {
             "target_answer": t,
             "pivot_node": p,
@@ -260,10 +328,12 @@ Output JSON only:
 
         generic_markers = ["incorrect", "wrong", "error", "unknown", "n/a"]
         if (not target) or any(m in target.lower() for m in generic_markers):
-            target = pick_non_gold(candidate_entities, original_answer, default_val="FallbackEntity")
+            ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+            target = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val="FallbackEntity")
 
         if (not pivot) or any(m in pivot.lower() for m in generic_markers):
-            pivot = pick_non_gold(candidate_entities, original_answer, default_val=target)
+            ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+            pivot = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val=target)
 
         plan["target_answer"] = target
         plan["pivot_node"] = pivot
@@ -271,14 +341,15 @@ Output JSON only:
 
     except Exception as e:
         print(f"⚠️ API failed, using entity-pool fallback: {e}")
-        t = pick_non_gold(candidate_entities, original_answer, default_val="FallbackEntity")
-        p = pick_non_gold(candidate_entities, original_answer, default_val=t)
+        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+        top_cands = ranked_cands[:max(1, target_top_k)]
+        t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
+        p = pick_non_gold(top_cands, original_answer, default_val=t)
         return {
             "target_answer": t,
             "pivot_node": p,
             "reasoning": "API failed; fallback to entity pool",
         }
-
 
 def find_potential_start_nodes(item) -> List[str]:
     """寻找可能起点，并过滤注入伪造节点。"""
