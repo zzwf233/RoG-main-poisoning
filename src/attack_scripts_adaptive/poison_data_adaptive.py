@@ -250,6 +250,58 @@ def rank_target_candidates(cands: List[str], question: str, original_answer: str
         uniq.append(c)
     return sorted(uniq, key=score, reverse=True)
 
+def build_adversarial_answer_set(
+    candidate_entities: List[str],
+    question: str,
+    original_answer: str,
+    selected_target: str,
+    top_k: int = 5,
+) -> List[str]:
+    """
+    硬类型过滤 + 两级回退:
+    1) strict: 只保留与问题类型一致的候选
+    2) fallback: 若数量不足，再从全量 ranked 候选补齐
+    """
+    ranked = rank_target_candidates(candidate_entities, question, original_answer)
+    qtype = infer_question_answer_type(question)
+    gold_n = _normalize_text(original_answer)
+    target_n = _normalize_text(selected_target)
+
+    def type_ok(name: str) -> bool:
+        # 问题类型未知时不过滤
+        if qtype == "entity":
+            return True
+        return infer_entity_type_hint(name) == qtype
+
+    out: List[str] = []
+    seen = set()
+
+    def add_if_valid(name: str):
+        n = _normalize_text(name)
+        if not n or n in seen or n == gold_n:
+            return
+        out.append(name)
+        seen.add(n)
+
+    # 先放 selected_target，但要求类型一致（硬过滤）
+    if selected_target and target_n != gold_n and type_ok(selected_target):
+        add_if_valid(selected_target)
+
+    # Level-1: 严格同类型候选
+    strict_pool = [c for c in ranked if type_ok(c)]
+    for cand in strict_pool:
+        add_if_valid(cand)
+        if len(out) >= max(1, top_k):
+            return out
+
+    # Level-2: 回退到全量 ranked（避免集合为空）
+    for cand in ranked:
+        add_if_valid(cand)
+        if len(out) >= max(1, top_k):
+            break
+
+    return out
+
 def llm_plan_pivot_attack(
     client: Optional[OpenAI],
     model_name: str,
@@ -440,14 +492,16 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
             dep_type = str(cur.get("dep_type", "")).strip().lower()
             needs_prev = bool(cur.get("needs_prev_answer", False))
 
-            if cur.get("is_poisoned") and needs_prev and dep_type == "bridge" and prev_target:
+            # 放宽继承条件：只要该子问题依赖前答案，就继承上一跳 target
+            if cur.get("is_poisoned") and needs_prev and prev_target:
                 cur["poison_target"] = prev_target
                 cur["poison_target_entity"] = prev_target
                 cur["target_answer"] = prev_target
                 cur["inherited_from_sub_id"] = prev_sub_id
                 cur["inherited_target"] = prev_target
+                cur["inherited_dep_type"] = dep_type
                 cur["is_dependency_injected"] = True
-                # 关键：bridge 继承时，同步改图中 m.tgt_* 的 type.object.name 尾实体
+                # 同步图中 m.tgt_* 的名称
                 cur = sync_injected_target_name_in_graph(cur, prev_target)
             else:
                 cur["is_dependency_injected"] = False
@@ -579,19 +633,29 @@ def main():
             [fake_pivot_id, "type.object.name", pivot_name],
             [target_ans_id, "type.object.name", target_answer],
         ]
+        # 前两跳/依赖跳注入加权（最小改动版）
+        needs_prev = bool(item.get("needs_prev_answer", False))
+        sub_id_raw = item.get("sub_id", 10**9)
+        try:
+            sub_id = int(sub_id_raw)
+        except Exception:
+            sub_id = 10**9
 
-        for _ in range(args.hop_repeat):
+        front_boost = 2 if (needs_prev or sub_id <= 1) else 1
+        hop_repeat_cur = max(1, int(args.hop_repeat * front_boost))
+        single_hop_repeat_cur = max(1, int(args.single_hop_repeat * front_boost))
+
+        for _ in range(hop_repeat_cur):
             poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
 
         if r2_clean:
-           for _ in range(args.hop_repeat):
-            # Keep both structured-ID tail and readable-text tail.
-            poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
-            poison_triples.append([fake_pivot_id, r2_clean, target_answer])
+            for _ in range(hop_repeat_cur):
+                poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+                poison_triples.append([fake_pivot_id, r2_clean, target_answer])
         else:
-            for _ in range(args.single_hop_repeat):
+            for _ in range(single_hop_repeat_cur):
                 poison_triples.append([primary_start_node, r1_clean, target_answer])
-
+                
         new_item = copy.deepcopy(item)
         new_item["graph"] = poison_triples + original_graph
 
