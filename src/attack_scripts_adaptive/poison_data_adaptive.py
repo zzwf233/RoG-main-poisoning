@@ -29,6 +29,7 @@ def parse_args():
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
     parser.add_argument("--single_hop_repeat", type=int, default=200, help="单跳时重复注入次数")
+    parser.add_argument("--front_boost",type=float,default=1.4,help="前两跳/依赖子问题的注入倍率（建议 1.0~1.6）",)
     parser.add_argument("--hop_boost_if_type_match", type=float, default=1.5, help="target 类型匹配时的注入倍数")
     parser.add_argument("--hop_boost_if_type_mismatch", type=float, default=0.7, help="target 类型不匹配时的注入倍数")
     parser.add_argument("--target_top_k", type=int, default=8, help="按语义得分保留前 k 个候选 target")
@@ -492,8 +493,11 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
             dep_type = str(cur.get("dep_type", "")).strip().lower()
             needs_prev = bool(cur.get("needs_prev_answer", False))
 
-            # 放宽继承条件：只要该子问题依赖前答案，就继承上一跳 target
-            if cur.get("is_poisoned") and needs_prev and prev_target:
+            # 半放宽：仅对白名单依赖类型做继承，避免全放开扩散噪声
+            inherit_dep_types = {"bridge", "coref"}
+            allow_inherit = (dep_type in inherit_dep_types)
+
+            if cur.get("is_poisoned") and needs_prev and allow_inherit and prev_target:
                 cur["poison_target"] = prev_target
                 cur["poison_target_entity"] = prev_target
                 cur["target_answer"] = prev_target
@@ -501,11 +505,10 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
                 cur["inherited_target"] = prev_target
                 cur["inherited_dep_type"] = dep_type
                 cur["is_dependency_injected"] = True
-                # 同步图中 m.tgt_* 的名称
+                # 同步更新注入节点名字
                 cur = sync_injected_target_name_in_graph(cur, prev_target)
             else:
                 cur["is_dependency_injected"] = False
-
             if cur.get("is_poisoned"):
                 t = str(cur.get("poison_target", "")).strip()
                 if t:
@@ -633,7 +636,6 @@ def main():
             [fake_pivot_id, "type.object.name", pivot_name],
             [target_ans_id, "type.object.name", target_answer],
         ]
-        # 前两跳/依赖跳注入加权（最小改动版）
         needs_prev = bool(item.get("needs_prev_answer", False))
         sub_id_raw = item.get("sub_id", 10**9)
         try:
@@ -641,21 +643,24 @@ def main():
         except Exception:
             sub_id = 10**9
 
-        front_boost = 2 if (needs_prev or sub_id <= 1) else 1
-        hop_repeat_cur = max(1, int(args.hop_repeat * front_boost))
-        single_hop_repeat_cur = max(1, int(args.single_hop_repeat * front_boost))
+        # 仅前两跳或依赖子问题加权
+        front_factor = args.front_boost if (needs_prev or sub_id <= 1) else 1.0
+        hop_repeat_cur = max(1, int(round(args.hop_repeat * front_factor)))
+        single_hop_repeat_cur = max(1, int(round(args.single_hop_repeat * front_factor)))
+
 
         for _ in range(hop_repeat_cur):
             poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
 
         if r2_clean:
             for _ in range(hop_repeat_cur):
+                # Keep both structured-ID tail and readable-text tail.
                 poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
                 poison_triples.append([fake_pivot_id, r2_clean, target_answer])
         else:
             for _ in range(single_hop_repeat_cur):
                 poison_triples.append([primary_start_node, r1_clean, target_answer])
-                
+        
         new_item = copy.deepcopy(item)
         new_item["graph"] = poison_triples + original_graph
 
