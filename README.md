@@ -44,6 +44,8 @@ python src/qa_prediction/gen_rule_path.py \
         -d {RoG-webqsp,RoG-cwq} \
         --split test \
         --n_beam 3
+# optional (offline mode): add --local_files_only if model already exists in local cache
+```
 Generated rules will be saved at: results/gen_rule_path/{dataset}/{model_name}/{split}
 
 Step2: Reasoning (Generate answers with RoG)
@@ -128,7 +130,7 @@ poison_data_llm_gen.py for adaptive poison target generation + multi-hop triple 
 
 predict_answer.py on clean/poison datasets.
 
-evaluation/eval_cascade.py to summarize clean ACC/Hit/F1 and poison ASR/A-H@1.
+evaluation/eval_cascade.py to summarize clean ACC/Hit/F1 and poison A-Precision/A-H@1/A-MRR.
 
 You can override paths with environment variables, e.g. ORIGINAL_DATASET_PATH, RUN_DECOMPOSE,
 DATASET_PATH, RULE_FILE, POISONED_DATASET_PATH, MODEL_PATH, PRED_ROOT, EVAL_REPORT.
