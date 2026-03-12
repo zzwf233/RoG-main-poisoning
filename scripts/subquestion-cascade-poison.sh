@@ -6,7 +6,7 @@ set -euo pipefail
 # 1) generate relation rules from decomposed sub-questions
 # 2) inject multi-hop poison triples guided by generated rules
 # 3) run clean / poisoned inference
-# 4) report clean accuracy + attack success rate (ASR/A-H@1)
+# 4) report clean accuracy + attack manipulation metrics (A-Precision/A-H@1/A-MRR)
 
 ORIGINAL_DATASET_PATH=${ORIGINAL_DATASET_PATH:-"datasets/clean_questions.jsonl"}
 RUN_DECOMPOSE=${RUN_DECOMPOSE:-"1"}
