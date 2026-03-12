@@ -108,6 +108,9 @@ def prediction(data, processed_list, input_builder, model):
     answer = data["answer"]
     id = data["id"]
     poison_target = data.get("poison_target", data.get("poison_target_entity"))
+    adversarial_answers = data.get("adversarial_answers", data.get("adversarial_answer_entities", []))
+    if isinstance(adversarial_answers, str):
+        adversarial_answers = [adversarial_answers]
     if id in processed_list:
         return None
 
@@ -141,6 +144,7 @@ def prediction(data, processed_list, input_builder, model):
             "prediction": prediction,
             "ground_truth": answer,
             "poison_target": poison_target,
+            "adversarial_answers": adversarial_answers,
             "input": question,
         }
 
@@ -157,6 +161,7 @@ def prediction(data, processed_list, input_builder, model):
         "prediction": prediction,
         "ground_truth": answer,
         "poison_target": poison_target,
+        "adversarial_answers": adversarial_answers,
         "input": input,
     }
     return result
