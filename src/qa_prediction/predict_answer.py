@@ -310,6 +310,7 @@ def main(args, LLM):
         for parent_id, items in tqdm(groups.items(), total=len(groups), desc="Cascade groups"):
             # 按 sub_id 排序，缺失时按 id 保底
             items.sort(key=lambda x: (int(x.get("sub_id", 10**9)) if str(x.get("sub_id", "")).isdigit() else 10**9, str(x.get("id", ""))))
+            is_chain = len(items) > 1
 
             state_prev_answer = ""
             for data in items:
@@ -318,7 +319,7 @@ def main(args, LLM):
                     continue
 
                 needs_prev = bool(data.get("needs_prev_answer", False))
-                if needs_prev and state_prev_answer:
+                if is_chain and needs_prev and state_prev_answer:
                     data = dict(data)
                     data["question"] = inject_prev_answer(
                         question=str(data.get("question", "")),
