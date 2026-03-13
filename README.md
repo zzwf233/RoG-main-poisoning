@@ -123,6 +123,9 @@ If you want to run a standard end-to-end workflow for sub-question cascading poi
 bash scripts/subquestion-cascade-poison.sh
 The script executes:
 0. decompose_subquestions.py to split original questions (optional, controlled by RUN_DECOMPOSE).
+   - One-hop questions are kept unchanged.
+   - Only likely multi-hop questions are decomposed and annotated with dependency fields
+     (`parent_id`, `sub_id`, `needs_prev_answer`, `dep_type`).
 
 gen_rule_path.py for sub-question rule generation.
 
