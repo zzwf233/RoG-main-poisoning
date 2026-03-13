@@ -17,6 +17,9 @@ RULE_FILE=${RULE_FILE:-"${RULE_OUTPUT_ROOT}/clean_subquestions/RoG/test/predicti
 POISONED_DATASET_PATH=${POISONED_DATASET_PATH:-"datasets/poisoned_subquestions.jsonl"}
 MODEL_PATH=${MODEL_PATH:-"rmanluo/RoG"}
 POISON_MODEL_NAME=${POISON_MODEL_NAME:-"Qwen/Qwen2.5-VL-72B-Instruct"}
+FRONT_BOOST=${FRONT_BOOST:-"1.4"}
+TYPE_MATCH_BOOST=${TYPE_MATCH_BOOST:-"1.5"}
+TYPE_MISMATCH_BOOST=${TYPE_MISMATCH_BOOST:-"0.7"}
 PROMPT_PATH=${PROMPT_PATH:-"prompts/llama2_predict.txt"}
 PRED_ROOT=${PRED_ROOT:-"results/KGQA"}
 EVAL_REPORT=${EVAL_REPORT:-"results/evaluation/cascade_eval_report.json"}
@@ -45,6 +48,9 @@ python src/attack_scripts_adaptive/poison_data_adaptive.py \
   --input_file "$DATASET_PATH" \
   --rule_file "$RULE_FILE" \
   --model_name "$POISON_MODEL_NAME" \
+  --front_boost "$FRONT_BOOST" \
+  --hop_boost_if_type_match "$TYPE_MATCH_BOOST" \
+  --hop_boost_if_type_mismatch "$TYPE_MISMATCH_BOOST" \
   --output_file "$POISONED_DATASET_PATH"
 
 printf "\n[3/4] Run clean inference...\n"
