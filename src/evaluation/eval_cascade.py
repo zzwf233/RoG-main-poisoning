@@ -328,6 +328,7 @@ def evaluate_chain_metrics(poison_pred_file: str, poison_data_file: str, k: int 
 
     for _, arr in grouped.items():
         arr.sort(key=lambda x: int(x.get("sub_id", 10**9)) if str(x.get("sub_id", "")).isdigit() else 10**9)
+        is_chain = len(arr) > 1
 
         dep_hits = []
         for it in arr:
@@ -337,7 +338,7 @@ def evaluate_chain_metrics(poison_pred_file: str, poison_data_file: str, k: int 
             ranked = parse_ranked_answers(pred_item.get("prediction", ""))
             hit = bool(ranked) and any(match(ranked[0], a) for a in adv_answers)
 
-            if bool(it.get("needs_prev_answer", False)):
+            if is_chain and bool(it.get("needs_prev_answer", False)):
                 dep_total += 1
                 dep_hit += 1 if hit else 0
                 dep_hits.append(hit)
