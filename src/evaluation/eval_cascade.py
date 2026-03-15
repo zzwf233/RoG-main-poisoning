@@ -297,6 +297,7 @@ def evaluate_subquestion_spread(poison_pred_file: str, poison_data_file: str):
             all_parent_hit_total / all_parent_total if all_parent_total > 0 else 0.0
         ),
         "top_shared_subquestions": shared_groups[:10],
+        "all_shared_subquestions": shared_groups,
         "debug_counters": debug_counters,
     }
 
@@ -328,7 +329,6 @@ def evaluate_chain_metrics(poison_pred_file: str, poison_data_file: str, k: int 
 
     for _, arr in grouped.items():
         arr.sort(key=lambda x: int(x.get("sub_id", 10**9)) if str(x.get("sub_id", "")).isdigit() else 10**9)
-        is_chain = len(arr) > 1
 
         dep_hits = []
         for it in arr:
@@ -338,7 +338,7 @@ def evaluate_chain_metrics(poison_pred_file: str, poison_data_file: str, k: int 
             ranked = parse_ranked_answers(pred_item.get("prediction", ""))
             hit = bool(ranked) and any(match(ranked[0], a) for a in adv_answers)
 
-            if is_chain and bool(it.get("needs_prev_answer", False)):
+            if bool(it.get("needs_prev_answer", False)):
                 dep_total += 1
                 dep_hit += 1 if hit else 0
                 dep_hits.append(hit)
@@ -379,8 +379,13 @@ def main():
         action="store_true",
         help="Print debug counters for spread-analysis filtering reasons",
     )
+    parser.add_argument(
+        "--shared_subquestions_file",
+        type=str,
+        default="",
+        help="Optional path to export all shared subquestions (parents>=2) as JSONL",
+    )
     args = parser.parse_args()
-
     clean = evaluate_clean(args.clean_pred_file)
     poison = evaluate_poison(args.poison_pred_file, args.poison_data_file)
     
@@ -419,6 +424,19 @@ def main():
         if args.debug_spread:
             report["subquestion_spread"]["debug_counters"] = spread.get("debug_counters", {})
             print("[debug_spread]", json.dumps(spread.get("debug_counters", {}), ensure_ascii=False))
+        if args.shared_subquestions_file:
+            export_path = Path(args.shared_subquestions_file)
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(export_path, "w", encoding="utf-8") as fout:
+                for x in spread.get("all_shared_subquestions", []):
+                    row = {
+                        "question": x["question"],
+                        "parents": x["parents"],
+                        "hit_parents": x["hit_parents"],
+                        "spread_rate": round(x["spread_rate"] * 100, 2),
+                    }
+                    fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(f"Saved shared subquestions to: {export_path}")
             
         chain = evaluate_chain_metrics(args.poison_pred_file, args.poison_data_file, k=2)
         report["chain_metrics"] = {
