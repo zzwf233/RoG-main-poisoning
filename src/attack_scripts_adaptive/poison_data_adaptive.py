@@ -19,6 +19,9 @@ def parse_args():
     parser.add_argument("--input_file", type=str, default="datasets/cwq_test.jsonl", help="原始数据集 JSONL")
     parser.add_argument("--rule_file", type=str, required=True, help="RoG rule 文件")
     parser.add_argument("--output_file", type=str, default="datasets/poisoned_cwq_dynamic.jsonl")
+    parser.add_argument("--mode", type=str, choices=["ours", "rand"], default="ours",
+                        help="Attack mode: ours=LLM planner pivot injection, rand=random baseline")
+
 
     # LLM 配置：优先命令行，其次环境变量
     parser.add_argument("--api_key", type=str, default="", help="OpenAI-compatible API key")
@@ -485,6 +488,7 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
                 return 10**9
 
         arr.sort(key=_sub_sort_key)
+        is_chain = len(arr) > 1
 
         prev_target = ""
         prev_sub_id = None
@@ -497,7 +501,7 @@ def apply_dependency_bridge_targets(items: List[dict]) -> List[dict]:
             inherit_dep_types = {"bridge", "coref"}
             allow_inherit = (dep_type in inherit_dep_types)
 
-            if cur.get("is_poisoned") and needs_prev and allow_inherit and prev_target:
+            if is_chain and cur.get("is_poisoned") and needs_prev and allow_inherit and prev_target:
                 cur["poison_target"] = prev_target
                 cur["poison_target_entity"] = prev_target
                 cur["target_answer"] = prev_target
@@ -556,6 +560,25 @@ def sync_injected_target_name_in_graph(item: dict, inherited_target: str) -> dic
 
     return item
 
+def build_random_attack_plan(
+    question: str,
+    original_answer: str,
+    r2: Optional[str],
+    candidate_entities: List[str],
+    target_top_k: int = 8,
+):
+    """Random baseline: sample target/pivot from ranked entity pool without LLM planning."""
+    ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+    pool = ranked_cands[: max(1, target_top_k)] if ranked_cands else candidate_entities
+
+    target = pick_non_gold(pool, original_answer, default_val="FallbackEntity")
+    pivot = pick_non_gold(pool, original_answer, default_val=target) if r2 else target
+    return {
+        "target_answer": target,
+        "pivot_node": pivot,
+        "reasoning": "random baseline from entity pool",
+    }
+
 def main():
     args = parse_args()
     random.seed(args.seed)
@@ -606,6 +629,27 @@ def main():
         candidate_entities = build_readable_entity_pool(item)
 
         primary_start_node = str(start_nodes[0])
+        if args.mode == "rand":
+            attack_plan = build_random_attack_plan(
+                question=question,
+                original_answer=ground_truth,
+                r2=r2_clean,
+                candidate_entities=candidate_entities,
+                target_top_k=args.target_top_k,
+            )
+        else:
+            attack_plan = llm_plan_pivot_attack(
+                client=client,
+                model_name=args.model_name,
+                question=question,
+                original_answer=ground_truth,
+                r1=r1_clean,
+                r2=r2_clean,
+                candidate_entities=candidate_entities,
+                temperature=args.temperature,
+                target_top_k=args.target_top_k,
+            )
+
         attack_plan = llm_plan_pivot_attack(
             client=client,
             model_name=args.model_name,
@@ -645,9 +689,20 @@ def main():
 
         # 仅前两跳或依赖子问题加权
         front_factor = args.front_boost if (needs_prev or sub_id <= 1) else 1.0
-        hop_repeat_cur = max(1, int(round(args.hop_repeat * front_factor)))
-        single_hop_repeat_cur = max(1, int(round(args.single_hop_repeat * front_factor)))
+        # 根据 target 与问题类型是否匹配再做一次增益/衰减。
+        # 若问题类型无法可靠判断（entity），则不额外缩放。
+        qtype = infer_question_answer_type(question)
+        target_type = infer_entity_type_hint(target_answer)
+        if qtype == "entity":
+            type_factor = 1.0
+        elif target_type == qtype:
+            type_factor = args.hop_boost_if_type_match
+        else:
+            type_factor = args.hop_boost_if_type_mismatch
 
+        repeat_factor = front_factor * type_factor
+        hop_repeat_cur = max(1, int(round(args.hop_repeat * repeat_factor)))
+        single_hop_repeat_cur = max(1, int(round(args.single_hop_repeat * repeat_factor)))
 
         for _ in range(hop_repeat_cur):
             poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
@@ -675,10 +730,15 @@ def main():
             new_item["question_entity"] = primary_start_node
 
         new_item["dynamic_pivot_name"] = pivot_name
+        new_item["front_factor"] = front_factor
+        new_item["attack_mode"] = "pivot_rand" if args.mode == "rand" else "pivot_llm"
+        new_item["type_factor"] = type_factor
+        new_item["repeat_factor"] = repeat_factor
         new_item["is_poisoned"] = True
         new_item["attack_mode"] = "pivot_llm"
         success_count += 1
         new_items.append(new_item)
+
 
     # ===== 二次 pass：依赖 bridge 继承 =====
     new_items = apply_dependency_bridge_targets(new_items)
