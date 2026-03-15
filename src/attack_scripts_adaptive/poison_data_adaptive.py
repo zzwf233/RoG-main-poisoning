@@ -650,16 +650,6 @@ def main():
                 target_top_k=args.target_top_k,
             )
 
-        attack_plan = llm_plan_pivot_attack(
-            client=client,
-            model_name=args.model_name,
-            question=question,
-            original_answer=ground_truth,
-            r1=r1_clean,
-            r2=r2_clean,
-            candidate_entities=candidate_entities,
-            temperature=args.temperature,
-        )
 
         if not attack_plan or not attack_plan.get("pivot_node"):
             new_items.append(item)
