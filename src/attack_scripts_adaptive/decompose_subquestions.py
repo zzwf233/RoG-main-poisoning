@@ -1,3 +1,37 @@
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Optional
+
+# Heuristics for detecting likely multi-hop questions.
+MULTIHOP_CUES = [
+    r"\bwho\b.*\b(whose|that|which)\b",
+    r"\bwhat\b.*\b(whose|that|which)\b",
+    r"\bwhere\b.*\b(whose|that|which)\b",
+    r"\bwhich\b.*\b(whose|that|which)\b",
+    r"\bafter\b",
+    r"\bbefore\b",
+    r"\bthen\b",
+    r"\bfirst\b",
+    r"\band\b",
+    r"\bof\b.*\bof\b",
+    r"\bfrom\b.*\bto\b",
+]
+
+# Lightweight rule-based split patterns for clause decomposition.
+SPLIT_PATTERNS = [
+    r",\s*and\s+",
+    r"\s+and\s+(?=(who|what|where|when|which|how)\b)",
+    r"\sand\s+then\s+",
+    r"\sthen\s+",
+    r"\safter\s+",
+    r"\sbefore\s+",
+    r"\swhich\s+",
+    r"\sthat\s+",
+    r"\swhose\s+",
+]
+
 def _to_full_question(text: str) -> str:
     q = (text or "").strip(" ,.;，。；")
     if not q:
@@ -111,7 +145,7 @@ def _infer_dep_type(subq: str, sub_id: int) -> str:
     if sub_id == 0:
         return "none"
     q = (subq or "").lower()
-    if any(x in q for x in ["[b]", "[c]", " it ", " its ", " they ", " them ", " that one ", " this one "]):
+    if any(x in q for x in ["[b]", "[c]", " it ", " its ", " they ", " them ", " he ", " she ", " that one ", " this one "]):
         return "coref"
     if any(x in q for x in [" which ", " what ", " where ", " when ", " who ", " whose "]):
         return "filter"
