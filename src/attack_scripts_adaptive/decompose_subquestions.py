@@ -33,6 +33,31 @@ SPLIT_PATTERNS = [
     r"\swhose\s+",
 ]
 
+# Semantic-template-first patterns (English), then fall back to rule splitting.
+SEMANTIC_TEMPLATE_PATTERNS = {
+    # e.g., "Which country is the city where X's Y was born located in?"
+    "x_y_born_city_country": re.compile(
+        r"""(?ix)
+        ^\s*(?:what|which)\s+country\s+
+        (?:is|was)?\s*
+        (?:the\s+)?(?:city|place|location)\s+
+        (?:where|in\s+which)\s+
+        (?P<x>.+?)\s*'s\s*(?P<y>.+?)\s*
+        (?:was\s+)?born
+        (?:\s+located\s+in)?\s*\??\s*$
+        """
+    ),
+    # e.g., "What country is X's Y in?" / "Which country is X's Y located in?"
+    "x_y_country": re.compile(
+        r"""(?ix)
+        ^\s*(?:what|which)\s+country\s+
+        (?:is|was)?\s*
+        (?P<x>.+?)\s*'s\s*(?P<y>.+?)\s*
+        (?:in|located\s+in)?\s*\??\s*$
+        """
+    ),
+}
+
 def _to_full_question(text: str) -> str:
     q = (text or "").strip(" ,.;，。；")
     if not q:
@@ -104,11 +129,49 @@ def _ensure_dependency(candidate: str, raw_fragment: str, sub_id: int) -> str:
     prev_placeholder = f"[{chr(ord('B') + sub_id - 1)}]"
     return _upgrade_low_information_subquestion(raw_fragment, prev_placeholder=prev_placeholder)
 
+def _to_entity_question(text: str) -> str:
+    q = _to_full_question(text)
+    if q.lower().startswith(("who ", "what ", "which ", "where ", "when ", "how ")):
+        return q
+    return f"Who is {q.strip('?')}?"
+
+
+def _semantic_template_decompose(question: str):
+    q = (question or "").strip()
+    if not q:
+        return None
+
+    m = SEMANTIC_TEMPLATE_PATTERNS["x_y_born_city_country"].match(q)
+    if m:
+        x = m.group("x").strip(" ,.;")
+        y = m.group("y").strip(" ,.;")
+        return [
+            _to_entity_question(f"{x}'s {y}"),
+            "Where was [B] born?",
+            "Which country is [C] located in?",
+        ]
+
+    m = SEMANTIC_TEMPLATE_PATTERNS["x_y_country"].match(q)
+    if m:
+        x = m.group("x").strip(" ,.;")
+        y = m.group("y").strip(" ,.;")
+        return [
+            _to_entity_question(f"{x}'s {y}"),
+            "Which country is [B] located in?",
+        ]
+
+    return None
+
+
 def _canonicalize_dependency_placeholder(candidate: str, sub_id: int) -> str:
     """Force explicit [B]/[C]/... placeholder for dependent subquestions."""
     if sub_id <= 0:
         return candidate
-
+    # Semantic templates first (English), then fallback to heuristic clause splitting.
+    templated = _semantic_template_decompose(text)
+    if templated:
+        return templated
+    
     expected = f"[{chr(ord('B') + sub_id - 1)}]"
     q = str(candidate or "")
 
