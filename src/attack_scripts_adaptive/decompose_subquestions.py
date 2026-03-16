@@ -167,10 +167,6 @@ def _canonicalize_dependency_placeholder(candidate: str, sub_id: int) -> str:
     """Force explicit [B]/[C]/... placeholder for dependent subquestions."""
     if sub_id <= 0:
         return candidate
-    # Semantic templates first (English), then fallback to heuristic clause splitting.
-    templated = _semantic_template_decompose(text)
-    if templated:
-        return templated
     
     expected = f"[{chr(ord('B') + sub_id - 1)}]"
     q = str(candidate or "")
@@ -211,7 +207,10 @@ def split_question(question: str):
     text = (question or "").strip()
     if not text:
         return []
-
+    # Semantic templates first (English), then fallback to heuristic clause splitting.
+    templated = _semantic_template_decompose(text)
+    if templated:
+        return templated
     # Keep single-hop / non-multihop samples untouched.
     if not _is_multihop_question(text):
         return [text]
