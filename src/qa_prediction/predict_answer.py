@@ -85,7 +85,11 @@ def inject_prev_answer(question: str, prev_answer: str, prev_token: str = "<PREV
     # 优先模板占位符
     if prev_token in q:
         return q.replace(prev_token, prev_answer)
-
+    
+    # 支持显式子问题依赖占位符 [B]/[C]/...
+    if re.search(r"\[[A-Z]\]", q):
+        return re.sub(r"\[[A-Z]\]", prev_answer, q)
+    
     # 简单英文代词替换（MVP）
     patterns = [
         (r"\bit\b", prev_answer),
