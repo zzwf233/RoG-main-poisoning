@@ -104,6 +104,45 @@ def _ensure_dependency(candidate: str, raw_fragment: str, sub_id: int) -> str:
     prev_placeholder = f"[{chr(ord('B') + sub_id - 1)}]"
     return _upgrade_low_information_subquestion(raw_fragment, prev_placeholder=prev_placeholder)
 
+def _canonicalize_dependency_placeholder(candidate: str, sub_id: int) -> str:
+    """Force explicit [B]/[C]/... placeholder for dependent subquestions."""
+    if sub_id <= 0:
+        return candidate
+
+    expected = f"[{chr(ord('B') + sub_id - 1)}]"
+    q = str(candidate or "")
+
+    # If placeholder exists, normalize it to the expected dependency token.
+    if re.search(r"\[[A-Z]\]", q):
+        q = re.sub(r"\[[A-Z]\]", expected, q)
+    else:
+        # Replace common coref mentions with the expected placeholder.
+        coref_patterns = [
+            r"\bit\b",
+            r"\bits\b",
+            r"\bthey\b",
+            r"\bthem\b",
+            r"\bhe\b",
+            r"\bshe\b",
+            r"\bthat one\b",
+            r"\bthis one\b",
+            r"\bthat country\b",
+            r"\bthat city\b",
+            r"\bthat person\b",
+        ]
+        replaced = False
+        for pat in coref_patterns:
+            if re.search(pat, q, flags=re.IGNORECASE):
+                q = re.sub(pat, expected, q, flags=re.IGNORECASE)
+                replaced = True
+                break
+
+        if not replaced and expected not in q:
+            if q.endswith("?"):
+                q = q[:-1].strip()
+            q = f"{q} of {expected}?"
+
+    return q
 
 def split_question(question: str):
     text = (question or "").strip()
@@ -137,6 +176,7 @@ def split_question(question: str):
             candidate = _upgrade_low_information_subquestion(p, prev_placeholder=prev_placeholder)
 
         candidate = _ensure_dependency(candidate, p, idx)
+        candidate = _canonicalize_dependency_placeholder(candidate, idx)
         uniq.append(candidate)
 
     return uniq
