@@ -28,9 +28,12 @@ def parse_args():
     parser.add_argument("--api_base", type=str, default=DEFAULT_API_BASE)
     parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--num_candidates", type=int, default=5, help="每题生成的对抗候选数 N")
+    parser.add_argument("--inject_top_k", type=int, default=3, help="实际注入的前 K 个候选")
     parser.add_argument("--require_api", action="store_true", help="强制要求至少一次 API 成功调用，否则报错退出")
     parser.add_argument("--api_usage_report", type=str, default="", help="可选：API 使用统计输出 JSON 路径")
-
+    parser.add_argument("--api_fail_fast_threshold", type=int, default=20, help="连续 API 失败达到阈值时提前终止（仅 require_api 生效）")
+    
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
     parser.add_argument("--single_hop_repeat", type=int, default=200, help="单跳时重复注入次数")
@@ -318,18 +321,52 @@ def llm_plan_pivot_attack(
     candidate_entities: List[str],
     temperature: float = 0.7,
     target_top_k: int = 8,
+    num_candidates: int = 5,
     usage_stats: Optional[dict] = None,
 ):
     """Pivot Injection planner：用 LLM 选 pivot + target。"""
+    n_cands = max(1, int(num_candidates))
+
+    def _unique_candidates(cands: List[dict]) -> List[dict]:
+        out = []
+        seen = set()
+        for c in cands:
+            t = str(c.get("target_answer", "")).strip()
+            p = str(c.get("pivot_node", "")).strip() or t
+            if not t:
+                continue
+            key = (t.lower(), p.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"target_answer": t, "pivot_node": p, "reasoning": str(c.get("reasoning", "")).strip()})
+        return out
+
+    def _fallback_candidates(single_hop: bool = False, reason: str = "fallback") -> List[dict]:
+        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
+        top_cands = ranked_cands[: max(1, target_top_k)] if ranked_cands else candidate_entities
+        out = []
+        for _ in range(n_cands):
+            t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
+            p = t if single_hop else pick_non_gold(top_cands, original_answer, default_val=t)
+            out.append({"target_answer": t, "pivot_node": p, "reasoning": reason})
+        out = _unique_candidates(out)
+        while len(out) < n_cands:
+            t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
+            out.append({"target_answer": t, "pivot_node": t if single_hop else t, "reasoning": reason})
+            out = _unique_candidates(out)
+        return out[:n_cands]
+
     if not r2 and client is None:
         # 单跳且无 API 时，回退到实体池
-        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-        t = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val="FallbackEntity")
+        cands = _fallback_candidates(single_hop=True, reason="single-hop fallback with entity-pool target")
+        t = cands[0]["target_answer"]
         return {
             "strategy": "direct_replacement",
             "target_answer": t,
             "pivot_node": t,
             "reasoning": "single-hop fallback with entity-pool target",
+            "candidates": cands,
         }
 
     prompt = f"""
@@ -363,22 +400,23 @@ Candidate entities (prefer these names):
 
 Output JSON only:
 {{
-  "target_answer": "false final answer",
-  "pivot_node": "entity node (single-hop时可与target_answer相同)",
-  "reasoning": "why"
+  "candidates": [
+    {{"target_answer": "false final answer 1", "pivot_node": "entity node", "reasoning": "why"}},
+    {{"target_answer": "false final answer 2", "pivot_node": "entity node", "reasoning": "why"}}
+  ]
 }}
 """
 
     if client is None:
         # 没有 API 时，也必须落到实体池，不要通用占位词
-        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-        top_cands = ranked_cands[:max(1, target_top_k)]
-        t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
-        p = pick_non_gold(top_cands, original_answer, default_val=t)
+        cands = _fallback_candidates(single_hop=(not r2), reason="No API client; fallback to entity pool")
+        t = cands[0]["target_answer"]
+        p = t if not r2 else cands[0]["pivot_node"]
         return {
             "target_answer": t,
             "pivot_node": p,
             "reasoning": "No API client; fallback to entity pool",
+            "candidates": cands,
         }
 
     try:
@@ -396,22 +434,45 @@ Output JSON only:
         plan = json.loads(_extract_json_block(content))
 
         # 对 LLM 输出做“实体池对齐”修复，避免回到 generic 文本
-        target = str(plan.get("target_answer", "")).strip()
-        pivot = str(plan.get("pivot_node", "")).strip()
+        raw_cands = plan.get("candidates", [])
+        if isinstance(raw_cands, dict):
+            raw_cands = [raw_cands]
+        if not isinstance(raw_cands, list):
+            raw_cands = []
+        norm_cands = _unique_candidates(raw_cands)
+        if not norm_cands:
+            # 兼容旧格式
+            target = str(plan.get("target_answer", "")).strip()
+            pivot = str(plan.get("pivot_node", "")).strip() or target
+            if target:
+                norm_cands = [{"target_answer": target, "pivot_node": pivot, "reasoning": str(plan.get("reasoning", "")).strip()}]
 
         generic_markers = ["incorrect", "wrong", "error", "unknown", "n/a"]
-        if (not target) or any(m in target.lower() for m in generic_markers):
-            ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-            target = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val="FallbackEntity")
+        fixed = []
+        for c in norm_cands:
+            target = str(c.get("target_answer", "")).strip()
+            pivot = str(c.get("pivot_node", "")).strip()
+            if (not target) or any(m in target.lower() for m in generic_markers):
+                fb = _fallback_candidates(single_hop=(not r2), reason="fallback fix target")[0]
+                target = fb["target_answer"]
+            if not r2:
+                pivot = target
+            elif (not pivot) or any(m in pivot.lower() for m in generic_markers):
+                fb = _fallback_candidates(single_hop=False, reason="fallback fix pivot")[0]
+                pivot = fb["pivot_node"]
+            fixed.append({"target_answer": target, "pivot_node": pivot, "reasoning": str(c.get("reasoning", "")).strip()})
+        norm_cands = _unique_candidates(fixed)
+        if len(norm_cands) < n_cands:
+            norm_cands.extend(_fallback_candidates(single_hop=(not r2), reason="backfill"))
+            norm_cands = _unique_candidates(norm_cands)
+        norm_cands = norm_cands[:n_cands]
 
-        if (not pivot) or any(m in pivot.lower() for m in generic_markers):
-            ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-            pivot = pick_non_gold(ranked_cands[:max(1, target_top_k)], original_answer, default_val=target)
-        if not r2:
-            # 单跳时保持 pivot=target，便于后续注入
-            pivot = target
+        target = norm_cands[0]["target_answer"]
+        pivot = norm_cands[0]["pivot_node"]
+
         plan["target_answer"] = target
         plan["pivot_node"] = pivot
+        plan["candidates"] = norm_cands
         if usage_stats is not None:
             usage_stats["api_success"] = int(usage_stats.get("api_success", 0)) + 1
         return plan
@@ -419,15 +480,20 @@ Output JSON only:
     except Exception as e:
         if usage_stats is not None:
             usage_stats["api_failed"] = int(usage_stats.get("api_failed", 0)) + 1
-        print(f"⚠️ API failed, using entity-pool fallback: {e}")
-        ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-        top_cands = ranked_cands[:max(1, target_top_k)]
-        t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
-        p = pick_non_gold(top_cands, original_answer, default_val=t)
+            usage_stats["api_error_logs"] = int(usage_stats.get("api_error_logs", 0)) + 1
+            log_idx = usage_stats["api_error_logs"]
+            if log_idx <= 3 or log_idx % 100 == 0:
+                print(f"⚠️ API failed, using entity-pool fallback: {e}")
+        else:
+            print(f"⚠️ API failed, using entity-pool fallback: {e}")
+        cands = _fallback_candidates(single_hop=(not r2), reason="API failed; fallback to entity pool")
+        t = cands[0]["target_answer"]
+        p = cands[0]["pivot_node"]
         return {
             "target_answer": t,
             "pivot_node": p,
             "reasoning": "API failed; fallback to entity pool",
+            "candidates": cands,
         }
 
 def find_potential_start_nodes(item) -> List[str]:
@@ -630,6 +696,7 @@ def main():
         "api_attempts": 0,
         "api_success": 0,
         "api_failed": 0,
+        "api_error_logs": 0,
         "fallback_no_client": 0,
         "fallback_single_hop": 0,
         "fallback_api_error": 0,
@@ -684,31 +751,54 @@ def main():
                 candidate_entities=candidate_entities,
                 temperature=args.temperature,
                 target_top_k=args.target_top_k,
+                num_candidates=args.num_candidates,
                 usage_stats=usage_stats,
             )
             if isinstance(attack_plan, dict) and "API failed" in str(attack_plan.get("reasoning", "")):
                 usage_stats["fallback_api_error"] += 1
-
+            if (
+                args.require_api
+                and usage_stats["api_success"] == 0
+                and usage_stats["api_failed"] >= max(1, args.api_fail_fast_threshold)
+            ):
+                raise RuntimeError(
+                    f"API failed {usage_stats['api_failed']} times before any success. "
+                    f"Fail-fast triggered (threshold={args.api_fail_fast_threshold}). "
+                    f"Please check --api_base={args.api_base}, model={args.model_name}, "
+                    "network egress, and API key validity."
+                )
 
         if not attack_plan or not attack_plan.get("pivot_node"):
             new_items.append(item)
             continue
 
-        pivot_name = str(attack_plan.get("pivot_node", "")).strip()
-        target_answer = str(attack_plan.get("target_answer", "")).strip()
-        if not target_answer:
+        raw_candidates = attack_plan.get("candidates", [])
+        if not isinstance(raw_candidates, list):
+            raw_candidates = []
+        candidate_plans = []
+        for c in raw_candidates:
+            t = str(c.get("target_answer", "")).strip()
+            p = str(c.get("pivot_node", "")).strip() or t
+            if not t:
+                continue
+            candidate_plans.append({"target_answer": t, "pivot_node": p})
+        if not candidate_plans:
+            t = str(attack_plan.get("target_answer", "")).strip()
+            p = str(attack_plan.get("pivot_node", "")).strip() or t
+            if t:
+                candidate_plans = [{"target_answer": t, "pivot_node": p}]
+
+        if not candidate_plans:
             new_items.append(item)
             continue
-
-        unique_tag = uuid.uuid4().hex[:6]
-        fake_pivot_id = f"m.piv_{unique_tag}"
-        target_ans_id = f"m.tgt_{unique_tag}"
+        inject_k = max(1, min(int(args.inject_top_k), len(candidate_plans)))
+        inject_plans = candidate_plans[:inject_k]
+        pivot_name = inject_plans[0]["pivot_node"]
+        target_answer = inject_plans[0]["target_answer"]
 
         original_graph = copy.deepcopy(item.get("graph", []))
-        poison_triples = [
-            [fake_pivot_id, "type.object.name", pivot_name],
-            [target_ans_id, "type.object.name", target_answer],
-        ]
+        poison_triples = []
+
         needs_prev = bool(item.get("needs_prev_answer", False))
         sub_id_raw = item.get("sub_id", 10**9)
         try:
@@ -733,17 +823,34 @@ def main():
         hop_repeat_cur = max(1, int(round(args.hop_repeat * repeat_factor)))
         single_hop_repeat_cur = max(1, int(round(args.single_hop_repeat * repeat_factor)))
 
-        for _ in range(hop_repeat_cur):
-            poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+        for plan_i in inject_plans:
+            unique_tag = uuid.uuid4().hex[:6]
+            fake_pivot_id = f"m.piv_{unique_tag}"
+            target_ans_id = f"m.tgt_{unique_tag}"
+            cur_pivot = str(plan_i["pivot_node"]).strip()
+            cur_target = str(plan_i["target_answer"]).strip()
+            if not cur_target:
+                continue
+            poison_triples.append([fake_pivot_id, "type.object.name", cur_pivot])
+            poison_triples.append([target_ans_id, "type.object.name", cur_target])
 
-        if r2_clean:
             for _ in range(hop_repeat_cur):
-                # Keep both structured-ID tail and readable-text tail.
-                poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
-                poison_triples.append([fake_pivot_id, r2_clean, target_answer])
-        else:
-            for _ in range(single_hop_repeat_cur):
-                poison_triples.append([primary_start_node, r1_clean, target_answer])
+                poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+
+            if r2_clean:
+                for _ in range(hop_repeat_cur):
+                    # Keep both structured-ID tail and readable-text tail.
+                    poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+                    poison_triples.append([fake_pivot_id, r2_clean, cur_target])
+            else:
+                for _ in range(single_hop_repeat_cur):
+                    poison_triples.append([primary_start_node, r1_clean, cur_target])
+
+        first_target_mid = ""
+        for tri in poison_triples:
+            if isinstance(tri, list) and len(tri) == 3 and str(tri[1]) == "type.object.name" and str(tri[0]).startswith("m.tgt_"):
+                first_target_mid = str(tri[0])
+                break
         
         new_item = copy.deepcopy(item)
         new_item["graph"] = poison_triples + original_graph
@@ -752,13 +859,18 @@ def main():
         new_item["dynamic_target_answer"] = target_answer
         new_item["poison_target"] = target_answer
         new_item["poison_target_entity"] = target_answer
-        new_item["poison_target_mid"] = target_ans_id
+        new_item["poison_target_mid"] = first_target_mid
+        new_item["adversarial_answers"] = [x["target_answer"] for x in inject_plans]
+        new_item["poison_targets"] = [x["target_answer"] for x in inject_plans]
         new_item["target_answer"] = target_answer
         if primary_start_node.startswith("m."):
             new_item["q_entity"] = [primary_start_node]
             new_item["question_entity"] = primary_start_node
 
         new_item["dynamic_pivot_name"] = pivot_name
+        new_item["adversarial_pivots"] = [x["pivot_node"] for x in inject_plans]
+        new_item["num_candidates"] = len(candidate_plans)
+        new_item["inject_top_k"] = inject_k
         new_item["front_factor"] = front_factor
         new_item["attack_mode"] = "pivot_rand" if args.mode == "rand" else "pivot_llm"
         new_item["type_factor"] = type_factor
