@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument("--api_base", type=str, default=DEFAULT_API_BASE)
     parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--require_api", action="store_true", help="强制要求至少一次 API 成功调用，否则报错退出")
+    parser.add_argument("--api_usage_report", type=str, default="", help="可选：API 使用统计输出 JSON 路径")
 
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
@@ -316,6 +318,7 @@ def llm_plan_pivot_attack(
     candidate_entities: List[str],
     temperature: float = 0.7,
     target_top_k: int = 8,
+    usage_stats: Optional[dict] = None,
 ):
     """Pivot Injection planner：用 LLM 选 pivot + target。"""
     if not r2:
@@ -367,6 +370,8 @@ Output JSON only:
         }
 
     try:
+        if usage_stats is not None:
+            usage_stats["api_attempts"] = int(usage_stats.get("api_attempts", 0)) + 1
         completion = client.chat.completions.create(
             model=model_name,
             messages=[
@@ -393,9 +398,13 @@ Output JSON only:
 
         plan["target_answer"] = target
         plan["pivot_node"] = pivot
+        if usage_stats is not None:
+            usage_stats["api_success"] = int(usage_stats.get("api_success", 0)) + 1
         return plan
 
     except Exception as e:
+        if usage_stats is not None:
+            usage_stats["api_failed"] = int(usage_stats.get("api_failed", 0)) + 1
         print(f"⚠️ API failed, using entity-pool fallback: {e}")
         ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
         top_cands = ranked_cands[:max(1, target_top_k)]
@@ -603,7 +612,16 @@ def main():
                 continue
 
     success_count = 0
+    usage_stats = {
+        "api_attempts": 0,
+        "api_success": 0,
+        "api_failed": 0,
+        "fallback_no_client": 0,
+        "fallback_single_hop": 0,
+        "fallback_api_error": 0,
+    }
     print("🚀 开始执行 Pivot Injection 攻击...")
+    
 
     new_items = []
     for item in tqdm(raw_data):
@@ -638,6 +656,11 @@ def main():
                 target_top_k=args.target_top_k,
             )
         else:
+            if not r2_clean:
+                usage_stats["fallback_single_hop"] += 1
+            elif client is None:
+                usage_stats["fallback_no_client"] += 1
+            attack_plan = llm_plan_pivot_attack(
             attack_plan = llm_plan_pivot_attack(
                 client=client,
                 model_name=args.model_name,
@@ -648,7 +671,10 @@ def main():
                 candidate_entities=candidate_entities,
                 temperature=args.temperature,
                 target_top_k=args.target_top_k,
+                usage_stats=usage_stats,
             )
+            if isinstance(attack_plan, dict) and "API failed" in str(attack_plan.get("reasoning", "")):
+                usage_stats["fallback_api_error"] += 1
 
 
         if not attack_plan or not attack_plan.get("pivot_node"):
@@ -738,6 +764,37 @@ def main():
             f_out.write(json.dumps(it, ensure_ascii=False) + "\n")
 
     print(f"✅ Pivot Injection 完成：成功修改 {success_count}/{len(raw_data)} 条。")
+    print(
+        "📊 API usage: attempts={api_attempts}, success={api_success}, failed={api_failed}, "
+        "fallback_no_client={fallback_no_client}, fallback_single_hop={fallback_single_hop}, "
+        "fallback_api_error={fallback_api_error}".format(**usage_stats)
+    )
+
+    if args.api_usage_report:
+        report_dir = os.path.dirname(args.api_usage_report)
+        if report_dir:
+            os.makedirs(report_dir, exist_ok=True)
+        with open(args.api_usage_report, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    **usage_stats,
+                    "mode": args.mode,
+                    "model_name": args.model_name,
+                    "api_base": args.api_base,
+                    "input_file": args.input_file,
+                    "output_file": args.output_file,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print(f"📝 API usage report saved to: {args.api_usage_report}")
+
+    if args.require_api and usage_stats["api_success"] <= 0:
+        raise RuntimeError(
+            "require_api=True but no successful API calls were made. "
+            "Please check API key/base/model and whether your data contains multi-hop samples."
+        )
 
 if __name__ == "__main__":
     main()
