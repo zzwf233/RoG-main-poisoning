@@ -661,7 +661,6 @@ def main():
             elif client is None:
                 usage_stats["fallback_no_client"] += 1
             attack_plan = llm_plan_pivot_attack(
-            attack_plan = llm_plan_pivot_attack(
                 client=client,
                 model_name=args.model_name,
                 question=question,
@@ -795,6 +794,6 @@ def main():
             "require_api=True but no successful API calls were made. "
             "Please check API key/base/model and whether your data contains multi-hop samples."
         )
-
+            
 if __name__ == "__main__":
     main()
