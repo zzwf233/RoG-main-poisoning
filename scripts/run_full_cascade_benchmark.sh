@@ -25,13 +25,15 @@ PREDICT_ROOT=${PREDICT_ROOT:-results/KGQA}
 RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 EVAL_ROOT=${EVAL_ROOT:-results/evaluation}
 N_BEAM=${N_BEAM:-3}
-
 API_KEY=${API_KEY:-${OPENAI_API_KEY:-${SILICONFLOW_API_KEY:-}}}
 API_BASE=${API_BASE:-https://api.siliconflow.cn/v1}
 ATTACK_MODEL_NAME=${ATTACK_MODEL_NAME:-Qwen/Qwen2.5-VL-72B-Instruct}
 ATTACK_TEMPERATURE=${ATTACK_TEMPERATURE:-0.7}
 REQUIRE_API=${REQUIRE_API:-0}
 API_USAGE_ROOT=${API_USAGE_ROOT:-results/evaluation/api_usage}
+API_FAIL_FAST_THRESHOLD=${API_FAIL_FAST_THRESHOLD:-20}
+NUM_CANDIDATES=${NUM_CANDIDATES:-5}
+INJECT_TOP_K=${INJECT_TOP_K:-3}
 
 if [[ -n "${API_KEY}" ]]; then
   export OPENAI_API_KEY="${API_KEY}"
@@ -93,6 +95,9 @@ poison_dataset() {
     --api_base "${API_BASE}" \
     --model_name "${ATTACK_MODEL_NAME}" \
     --temperature "${ATTACK_TEMPERATURE}" \
+    --num_candidates "${NUM_CANDIDATES}" \
+    --inject_top_k "${INJECT_TOP_K}" \
+    --api_fail_fast_threshold "${API_FAIL_FAST_THRESHOLD}" \
     --api_usage_report "${api_report_path}" \
     --front_boost 1.4 \
     --hop_boost_if_type_match 1.5 \
