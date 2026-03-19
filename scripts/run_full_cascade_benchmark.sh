@@ -26,6 +26,21 @@ RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 EVAL_ROOT=${EVAL_ROOT:-results/evaluation}
 N_BEAM=${N_BEAM:-3}
 
+API_KEY=${API_KEY:-${OPENAI_API_KEY:-${SILICONFLOW_API_KEY:-}}}
+API_BASE=${API_BASE:-https://api.siliconflow.cn/v1}
+ATTACK_MODEL_NAME=${ATTACK_MODEL_NAME:-Qwen/Qwen2.5-VL-72B-Instruct}
+ATTACK_TEMPERATURE=${ATTACK_TEMPERATURE:-0.7}
+REQUIRE_API=${REQUIRE_API:-0}
+API_USAGE_ROOT=${API_USAGE_ROOT:-results/evaluation/api_usage}
+
+if [[ -n "${API_KEY}" ]]; then
+  export OPENAI_API_KEY="${API_KEY}"
+  export SILICONFLOW_API_KEY="${API_KEY}"
+  echo "[api] API key detected. LLM planner + GPT prediction (if selected) can call API."
+else
+  echo "[api] No API key detected. poison_data stage will fallback to entity-pool planner."
+fi
+
 run_stage() {
   local stage="$1"
   [[ ",${STAGES}," == *",${stage},"* ]]
@@ -69,14 +84,31 @@ gen_rule_dataset() {
 
 poison_dataset() {
   local name="$1"
-  python src/attack_scripts_adaptive/poison_data_adaptive.py \
+  local api_report_path="${API_USAGE_ROOT}/${name}_poison_api_usage.json"
+  local cmd=(
+    python src/attack_scripts_adaptive/poison_data_adaptive.py
     --input_file "datasets/${name}_full.jsonl" \
     --rule_file "${RULE_ROOT}/${name}_full/${MODEL_NAME}/test/predictions_${N_BEAM}_False.jsonl" \
     --output_file "datasets/poisoned_${name}_dynamic_full.jsonl" \
+    --api_base "${API_BASE}" \
+    --model_name "${ATTACK_MODEL_NAME}" \
+    --temperature "${ATTACK_TEMPERATURE}" \
+    --api_usage_report "${api_report_path}" \
     --front_boost 1.4 \
     --hop_boost_if_type_match 1.5 \
     --hop_boost_if_type_mismatch 0.7
+  )
+
+  if [[ -n "${API_KEY}" ]]; then
+    cmd+=(--api_key "${API_KEY}")
+  fi
+  if [[ "${REQUIRE_API}" == "1" ]]; then
+    cmd+=(--require_api)
+  fi
+
+  "${cmd[@]}"
 }
+
 
 predict_dataset() {
   local split_tag="$1"   # clean or poison
@@ -124,7 +156,7 @@ eval_dataset() {
 }
 
 main() {
-  mkdir -p "${RULE_ROOT}" "${PREDICT_ROOT}" "${EVAL_ROOT}"
+  mkdir -p "${RULE_ROOT}" "${PREDICT_ROOT}" "${EVAL_ROOT}" "${API_USAGE_ROOT}"
 
   if run_stage copy; then
     copy_full_inputs
