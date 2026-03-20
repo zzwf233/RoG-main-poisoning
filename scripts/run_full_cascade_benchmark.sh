@@ -37,6 +37,7 @@ INJECT_TOP_K=${INJECT_TOP_K:-3}
 API_TIMEOUT=${API_TIMEOUT:-30}
 API_MAX_RETRIES=${API_MAX_RETRIES:-1}
 API_MAX_TOKENS=${API_MAX_TOKENS:-256}
+MULTI_HOP_INJECT_MODE=${MULTI_HOP_INJECT_MODE:-first_then_second}
 
 if [[ -n "${API_KEY}" ]]; then
   export OPENAI_API_KEY="${API_KEY}"
@@ -103,6 +104,7 @@ poison_dataset() {
     --api_timeout "${API_TIMEOUT}" \
     --api_max_retries "${API_MAX_RETRIES}" \
     --api_max_tokens "${API_MAX_TOKENS}" \
+    --multi_hop_inject_mode "${MULTI_HOP_INJECT_MODE}" \
     --api_fail_fast_threshold "${API_FAIL_FAST_THRESHOLD}" \
     --api_usage_report "${api_report_path}" \
     --front_boost 1.4 \
