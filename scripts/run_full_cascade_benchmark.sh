@@ -33,11 +33,13 @@ REQUIRE_API=${REQUIRE_API:-0}
 API_USAGE_ROOT=${API_USAGE_ROOT:-results/evaluation/api_usage}
 API_FAIL_FAST_THRESHOLD=${API_FAIL_FAST_THRESHOLD:-20}
 NUM_CANDIDATES=${NUM_CANDIDATES:-3}
-INJECT_TOP_K=${INJECT_TOP_K:-3}
-API_TIMEOUT=${API_TIMEOUT:-5}
+INJECT_TOP_K=${INJECT_TOP_K:-2}
+API_TIMEOUT=${API_TIMEOUT:-15}
 API_MAX_RETRIES=${API_MAX_RETRIES:-0}
-API_MAX_TOKENS=${API_MAX_TOKENS:-256}
+API_MAX_TOKENS=${API_MAX_TOKENS:-192}
 MULTI_HOP_INJECT_MODE=${MULTI_HOP_INJECT_MODE:-first_then_second}
+PREDICT_MAX_NEW_TOKENS=${PREDICT_MAX_NEW_TOKENS:-128}
+SLOW_LOG_SECONDS=${SLOW_LOG_SECONDS:-30}
 
 if [[ -n "${API_KEY}" ]]; then
   export OPENAI_API_KEY="${API_KEY}"
@@ -148,6 +150,8 @@ predict_dataset() {
     --rule_path "${RULE_ROOT}/${name}_full/${MODEL_NAME}/test/predictions_${N_BEAM}_False.jsonl" \
     --predict_path "${PREDICT_ROOT}" \
     --force \
+    --max_new_tokens "${PREDICT_MAX_NEW_TOKENS}" \
+    --slow_log_seconds "${SLOW_LOG_SECONDS}" \
     --cascade_mode
 }
 
