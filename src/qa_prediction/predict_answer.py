@@ -14,7 +14,7 @@ import json
 from multiprocessing import Pool
 from qa_prediction.build_qa_input import PromptBuilder
 from functools import partial
-
+import time
 
 def get_output_file(path, force=False):
     if not os.path.exists(path) or force:
@@ -331,8 +331,16 @@ def main(args, LLM):
                         prev_token=args.prev_answer_token,
                     )
 
+                t0 = time.time()
                 res = prediction(data, processed_list, input_builder, model)
+                dt = time.time() - t0
                 if res is not None:
+                    if dt >= args.slow_log_seconds:
+                        print(
+                            f"⚠️ Slow sample in cascade: id={res.get('id')} "
+                            f"sub_id={data.get('sub_id', '')} elapsed={dt:.1f}s "
+                            f"input_chars={len(str(res.get('input', '')))}"
+                        )
                     fout.write(json.dumps(res) + "\n")
                     fout.flush()
                     top1 = parse_top1_text(res.get("prediction", ""))
@@ -360,8 +368,15 @@ def main(args, LLM):
                         fout.flush()
         else:
             for data in tqdm(dataset):
+                t0 = time.time()
                 res = prediction(data, processed_list, input_builder, model)
+                dt = time.time() - t0
                 if res is not None:
+                    if dt >= args.slow_log_seconds:
+                        print(
+                            f"⚠️ Slow sample: id={res.get('id')} elapsed={dt:.1f}s "
+                            f"input_chars={len(str(res.get('input', '')))}"
+                        )
                     if args.debug:
                         print(json.dumps(res))
                     fout.write(json.dumps(res) + "\n")
@@ -408,7 +423,8 @@ if __name__ == "__main__":
     argparser.add_argument("--debug", action="store_true")
     argparser.add_argument("--cascade_mode", action="store_true")
     argparser.add_argument("--prev_answer_token", type=str, default="<PREV_ANSWER>")
-
+    argparser.add_argument("--slow_log_seconds", type=float, default=30.0)
+    
     args, _ = argparser.parse_known_args()
     if args.model_name != "no-llm":
         LLM = get_registed_model(args.model_name)
