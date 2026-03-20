@@ -360,9 +360,21 @@ def llm_plan_pivot_attack(
             p = t if single_hop else pick_non_gold(top_cands, original_answer, default_val=t)
             out.append({"target_answer": t, "pivot_node": p, "reasoning": reason})
         out = _unique_candidates(out)
-        while len(out) < n_cands:
+        # Guard against infinite loops when candidate pool is tiny (e.g., only 1 unique value).
+        max_fill_attempts = max(10, n_cands * 10)
+        attempts = 0
+        while len(out) < n_cands and attempts < max_fill_attempts:
+            attempts += 1
             t = pick_non_gold(top_cands, original_answer, default_val="FallbackEntity")
             out.append({"target_answer": t, "pivot_node": t if single_hop else t, "reasoning": reason})
+            out = _unique_candidates(out)
+        if len(out) < n_cands:
+            # Deterministic synthetic backfill to guarantee termination.
+            seed = out[0]["target_answer"] if out else "FallbackEntity"
+            for i in range(len(out), n_cands):
+                t = f"{seed}__alt{i+1}"
+                p = t if single_hop else t
+                out.append({"target_answer": t, "pivot_node": p, "reasoning": f"{reason}; synthetic_backfill"})
             out = _unique_candidates(out)
         return out[:n_cands]
 
