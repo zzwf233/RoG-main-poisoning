@@ -45,7 +45,7 @@ class Llama(BaseLanguageModel):
 
     def load_model(self, **kwargs):
         # 🚨 修正 2：确保分词器加载也使用 local_files_only
-        kwargs.update({'local_files_only': True, 'use_auth_token': False})
+        kwargs.update({'local_files_only': True})
         kwargs.update({'use_fast': False})
 
         # 🚨 最终修正：使用 self.args.model_path 作为第一个位置参数，并传入 **kwargs
@@ -64,7 +64,7 @@ class Llama(BaseLanguageModel):
         # 否则可能在 decode 阶段出现 piece id is out of range。
         num_added = self.tokenizer.add_tokens(self.ROG_NEW_TOKENS)
         if num_added > 0 or len(self.tokenizer) != self.model.get_input_embeddings().weight.size(0):
-            self.model.resize_token_embeddings(len(self.tokenizer))
+            self.model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
