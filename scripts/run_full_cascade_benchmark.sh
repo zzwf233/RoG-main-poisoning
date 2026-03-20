@@ -34,6 +34,9 @@ API_USAGE_ROOT=${API_USAGE_ROOT:-results/evaluation/api_usage}
 API_FAIL_FAST_THRESHOLD=${API_FAIL_FAST_THRESHOLD:-20}
 NUM_CANDIDATES=${NUM_CANDIDATES:-5}
 INJECT_TOP_K=${INJECT_TOP_K:-3}
+API_TIMEOUT=${API_TIMEOUT:-30}
+API_MAX_RETRIES=${API_MAX_RETRIES:-1}
+API_MAX_TOKENS=${API_MAX_TOKENS:-256}
 
 if [[ -n "${API_KEY}" ]]; then
   export OPENAI_API_KEY="${API_KEY}"
@@ -97,6 +100,9 @@ poison_dataset() {
     --temperature "${ATTACK_TEMPERATURE}" \
     --num_candidates "${NUM_CANDIDATES}" \
     --inject_top_k "${INJECT_TOP_K}" \
+    --api_timeout "${API_TIMEOUT}" \
+    --api_max_retries "${API_MAX_RETRIES}" \
+    --api_max_tokens "${API_MAX_TOKENS}" \
     --api_fail_fast_threshold "${API_FAIL_FAST_THRESHOLD}" \
     --api_usage_report "${api_report_path}" \
     --front_boost 1.4 \
