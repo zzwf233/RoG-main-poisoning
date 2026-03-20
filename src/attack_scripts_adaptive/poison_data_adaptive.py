@@ -30,10 +30,13 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--num_candidates", type=int, default=5, help="每题生成的对抗候选数 N")
     parser.add_argument("--inject_top_k", type=int, default=3, help="实际注入的前 K 个候选")
+    parser.add_argument("--api_timeout", type=float, default=30.0, help="单次 API 请求超时（秒）")
+    parser.add_argument("--api_max_retries", type=int, default=1, help="单样本 API 重试次数（额外重试）")
+    parser.add_argument("--api_max_tokens", type=int, default=256, help="API 返回最大 token，降低延迟与费用")
     parser.add_argument("--require_api", action="store_true", help="强制要求至少一次 API 成功调用，否则报错退出")
     parser.add_argument("--api_usage_report", type=str, default="", help="可选：API 使用统计输出 JSON 路径")
     parser.add_argument("--api_fail_fast_threshold", type=int, default=20, help="连续 API 失败达到阈值时提前终止（仅 require_api 生效）")
-    
+
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
     parser.add_argument("--single_hop_repeat", type=int, default=200, help="单跳时重复注入次数")
@@ -322,6 +325,9 @@ def llm_plan_pivot_attack(
     temperature: float = 0.7,
     target_top_k: int = 8,
     num_candidates: int = 5,
+    api_timeout: float = 30.0,
+    api_max_retries: int = 1,
+    api_max_tokens: int = 256,
     usage_stats: Optional[dict] = None,
 ):
     """Pivot Injection planner：用 LLM 选 pivot + target。"""
@@ -420,16 +426,35 @@ Output JSON only:
         }
 
     try:
-        if usage_stats is not None:
-            usage_stats["api_attempts"] = int(usage_stats.get("api_attempts", 0)) + 1
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "You are a logical adversary. Output valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=temperature,
-        )
+        last_err = None
+        tries = max(1, int(api_max_retries) + 1)
+        completion = None
+        for _ in range(tries):
+            if usage_stats is not None:
+                usage_stats["api_attempts"] = int(usage_stats.get("api_attempts", 0)) + 1
+            try:
+                completion = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a logical adversary. Output strict JSON only. No markdown, no analysis."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=temperature,
+                    max_tokens=max(32, int(api_max_tokens)),
+                    timeout=max(5.0, float(api_timeout)),
+                )
+                break
+            except Exception as e:
+                last_err = e
+                if usage_stats is not None:
+                    usage_stats["api_failed"] = int(usage_stats.get("api_failed", 0)) + 1
+                    usage_stats["api_error_logs"] = int(usage_stats.get("api_error_logs", 0)) + 1
+                    log_idx = usage_stats["api_error_logs"]
+                    if log_idx <= 3 or log_idx % 100 == 0:
+                        print(f"⚠️ API failed (retrying), using entity-pool fallback if exhausted: {e}")
+        if completion is None:
+            raise last_err if last_err else RuntimeError("API call failed with unknown error")
+
         content = completion.choices[0].message.content or ""
         plan = json.loads(_extract_json_block(content))
 
@@ -479,9 +504,7 @@ Output JSON only:
 
     except Exception as e:
         if usage_stats is not None:
-            usage_stats["api_failed"] = int(usage_stats.get("api_failed", 0)) + 1
-            usage_stats["api_error_logs"] = int(usage_stats.get("api_error_logs", 0)) + 1
-            log_idx = usage_stats["api_error_logs"]
+            log_idx = int(usage_stats.get("api_error_logs", 0))
             if log_idx <= 3 or log_idx % 100 == 0:
                 print(f"⚠️ API failed, using entity-pool fallback: {e}")
         else:
@@ -752,6 +775,9 @@ def main():
                 temperature=args.temperature,
                 target_top_k=args.target_top_k,
                 num_candidates=args.num_candidates,
+                api_timeout=args.api_timeout,
+                api_max_retries=args.api_max_retries,
+                api_max_tokens=args.api_max_tokens,
                 usage_stats=usage_stats,
             )
             if isinstance(attack_plan, dict) and "API failed" in str(attack_plan.get("reasoning", "")):
@@ -767,6 +793,7 @@ def main():
                     f"Please check --api_base={args.api_base}, model={args.model_name}, "
                     "network egress, and API key validity."
                 )
+
 
         if not attack_plan or not attack_plan.get("pivot_node"):
             new_items.append(item)
@@ -888,7 +915,6 @@ def main():
         for it in new_items:
             f_out.write(json.dumps(it, ensure_ascii=False) + "\n")
 
-    print(f"✅ Pivot Injection 完成：成功修改 {success_count}/{len(raw_data)} 条。")
     print(
         "📊 API usage: attempts={api_attempts}, success={api_success}, failed={api_failed}, "
         "fallback_no_client={fallback_no_client}, fallback_single_hop={fallback_single_hop}, "
