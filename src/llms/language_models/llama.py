@@ -64,7 +64,9 @@ class Llama(BaseLanguageModel):
         # 否则可能在 decode 阶段出现 piece id is out of range。
         num_added = self.tokenizer.add_tokens(self.ROG_NEW_TOKENS)
         if num_added > 0 or len(self.tokenizer) != self.model.get_input_embeddings().weight.size(0):
-            self.model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
+            # NOTE: Keep embedding rows exactly equal to tokenizer size for HF/Accelerate hooks.
+            # Using pad_to_multiple_of here can create shape mismatches at runtime under device_map hooks.
+            self.model.resize_token_embeddings(len(self.tokenizer))
 
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
