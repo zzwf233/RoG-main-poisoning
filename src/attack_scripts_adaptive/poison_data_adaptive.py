@@ -30,13 +30,16 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--num_candidates", type=int, default=5, help="每题生成的对抗候选数 N")
     parser.add_argument("--inject_top_k", type=int, default=3, help="实际注入的前 K 个候选")
+    parser.add_argument("--multi_hop_inject_mode", type=str, default="first_then_second",
+                        choices=["full", "first_then_second"],
+                        help="多跳注入策略：full=同时注入第一跳和第二跳；first_then_second=优先只注入第一跳，第一跳不可用时退化为第二跳")
     parser.add_argument("--api_timeout", type=float, default=30.0, help="单次 API 请求超时（秒）")
     parser.add_argument("--api_max_retries", type=int, default=1, help="单样本 API 重试次数（额外重试）")
     parser.add_argument("--api_max_tokens", type=int, default=256, help="API 返回最大 token，降低延迟与费用")
     parser.add_argument("--require_api", action="store_true", help="强制要求至少一次 API 成功调用，否则报错退出")
     parser.add_argument("--api_usage_report", type=str, default="", help="可选：API 使用统计输出 JSON 路径")
     parser.add_argument("--api_fail_fast_threshold", type=int, default=20, help="连续 API 失败达到阈值时提前终止（仅 require_api 生效）")
-
+    
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
     parser.add_argument("--single_hop_repeat", type=int, default=200, help="单跳时重复注入次数")
@@ -725,7 +728,6 @@ def main():
         "fallback_api_error": 0,
     }
     print("🚀 开始执行 Pivot Injection 攻击...")
-    
 
     new_items = []
     for item in tqdm(raw_data):
@@ -743,9 +745,15 @@ def main():
 
         r1_clean, r2_clean = rule_info
         start_nodes = find_potential_start_nodes(item)
+        no_start_fallback_second_hop = False
         if not start_nodes:
-            new_items.append(item)
-            continue
+            if r2_clean and args.multi_hop_inject_mode == "first_then_second":
+                # 第一跳不可用（无 start node）时，退化为第二跳注入
+                no_start_fallback_second_hop = True
+                start_nodes = ["__NO_START__"]
+            else:
+                new_items.append(item)
+                continue
 
         # ===== 关键改动：构建当前样本实体池并传给 planner =====
         candidate_entities = build_readable_entity_pool(item)
@@ -760,7 +768,7 @@ def main():
                 target_top_k=args.target_top_k,
             )
         else:
-            if not r2_clean:
+            if (not r2_clean) and client is None:
                 usage_stats["fallback_single_hop"] += 1
             elif client is None:
                 usage_stats["fallback_no_client"] += 1
@@ -825,7 +833,6 @@ def main():
 
         original_graph = copy.deepcopy(item.get("graph", []))
         poison_triples = []
-
         needs_prev = bool(item.get("needs_prev_answer", False))
         sub_id_raw = item.get("sub_id", 10**9)
         try:
@@ -861,15 +868,26 @@ def main():
             poison_triples.append([fake_pivot_id, "type.object.name", cur_pivot])
             poison_triples.append([target_ans_id, "type.object.name", cur_target])
 
-            for _ in range(hop_repeat_cur):
-                poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
-
             if r2_clean:
-                for _ in range(hop_repeat_cur):
-                    # Keep both structured-ID tail and readable-text tail.
-                    poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
-                    poison_triples.append([fake_pivot_id, r2_clean, cur_target])
+                if args.multi_hop_inject_mode == "full":
+                    for _ in range(hop_repeat_cur):
+                        poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+                    for _ in range(hop_repeat_cur):
+                        # Keep both structured-ID tail and readable-text tail.
+                        poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+                        poison_triples.append([fake_pivot_id, r2_clean, cur_target])
+                else:
+                    # first_then_second: 优先第一跳；若第一跳不可用（无 start node）则退化到第二跳
+                    if not no_start_fallback_second_hop and primary_start_node != "__NO_START__":
+                        for _ in range(hop_repeat_cur):
+                            poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
+                    else:
+                        for _ in range(hop_repeat_cur):
+                            poison_triples.append([fake_pivot_id, r2_clean, target_ans_id])
+                            poison_triples.append([fake_pivot_id, r2_clean, cur_target])
             else:
+                for _ in range(hop_repeat_cur):
+                    poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
                 for _ in range(single_hop_repeat_cur):
                     poison_triples.append([primary_start_node, r1_clean, cur_target])
 
@@ -915,6 +933,7 @@ def main():
         for it in new_items:
             f_out.write(json.dumps(it, ensure_ascii=False) + "\n")
 
+    print(f"✅ Pivot Injection 完成：成功修改 {success_count}/{len(raw_data)} 条。")
     print(
         "📊 API usage: attempts={api_attempts}, success={api_success}, failed={api_failed}, "
         "fallback_no_client={fallback_no_client}, fallback_single_hop={fallback_single_hop}, "
