@@ -264,7 +264,6 @@ poison_ours_stage() {
     --hop_boost_if_type_mismatch "$OURS_HOP_BOOST_MISMATCH"
 }
 
-
 predict_once() {
   local data_path="$1"
   local d_name="$2"
