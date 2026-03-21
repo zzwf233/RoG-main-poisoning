@@ -8,6 +8,9 @@ set -euo pipefail
 #   bash scripts/run_table3_paper_aligned.sh
 #   MODEL_PATH=/path/to/your/RoG-model bash scripts/run_table3_paper_aligned.sh
 #   DATASETS=cwq STAGES=rule,poison,predict,table3 bash scripts/run_table3_paper_aligned.sh
+#
+# Advanced staged execution:
+#   STAGES=rule,poison_rand,predict_clean,predict_rand,table3
 
 STAGES=${STAGES:-"rule,poison,predict,table3"}
 DATASETS=${DATASETS:-"cwq,webqsp"}
@@ -16,22 +19,22 @@ MODEL_NAME=${MODEL_NAME:-RoG}
 MODEL_PATH=${MODEL_PATH:-./RoG-model}
 PROMPT_PATH=${PROMPT_PATH:-prompts/llama2_predict.txt}
 N_BEAM=${N_BEAM:-3}
-API_KEY=${API_KEY:-${SILICONFLOW_API_KEY:-${OPENAI_API_KEY:-""}}}
-API_BASE=${API_BASE:-"https://api.siliconflow.cn/v1"}
-REQUIRE_API=${REQUIRE_API:-"0"}
 
-# Separate attack-strength knobs for rand/ours (paper-aligned ablation convenience)
-RAND_HOP_REPEAT=${RAND_HOP_REPEAT:-20}
-RAND_SINGLE_HOP_REPEAT=${RAND_SINGLE_HOP_REPEAT:-40}
-RAND_FRONT_BOOST=${RAND_FRONT_BOOST:-1.1}
-RAND_HOP_BOOST_MATCH=${RAND_HOP_BOOST_MATCH:-1.2}
-RAND_HOP_BOOST_MISMATCH=${RAND_HOP_BOOST_MISMATCH:-0.9}
+# Separate attack-strength knobs for rand/ours.
+# Rand defaults are intentionally mild to prevent over-poisoning collapse.
+RAND_HOP_REPEAT=${RAND_HOP_REPEAT:-3}
+RAND_SINGLE_HOP_REPEAT=${RAND_SINGLE_HOP_REPEAT:-6}
+RAND_FRONT_BOOST=${RAND_FRONT_BOOST:-1.0}
+RAND_HOP_BOOST_MATCH=${RAND_HOP_BOOST_MATCH:-1.0}
+RAND_HOP_BOOST_MISMATCH=${RAND_HOP_BOOST_MISMATCH:-1.0}
+RAND_INJECT_TOP_K=${RAND_INJECT_TOP_K:-1}
 
 OURS_HOP_REPEAT=${OURS_HOP_REPEAT:-100}
 OURS_SINGLE_HOP_REPEAT=${OURS_SINGLE_HOP_REPEAT:-200}
 OURS_FRONT_BOOST=${OURS_FRONT_BOOST:-1.4}
 OURS_HOP_BOOST_MATCH=${OURS_HOP_BOOST_MATCH:-1.5}
 OURS_HOP_BOOST_MISMATCH=${OURS_HOP_BOOST_MISMATCH:-0.7}
+OURS_INJECT_TOP_K=${OURS_INJECT_TOP_K:-3}
 
 RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 PRED_ROOT=${PRED_ROOT:-results/KGQA}
@@ -42,9 +45,12 @@ CWQ_CLEAN=${CWQ_CLEAN:-datasets/clean_cwq.jsonl}
 WEBQSP_CLEAN=${WEBQSP_CLEAN:-datasets/clean_webqsp.jsonl}
 CWQ_PARQUET_GLOB=${CWQ_PARQUET_GLOB:-datasets/cwq/test-*.parquet}
 WEBQSP_PARQUET_GLOB=${WEBQSP_PARQUET_GLOB:-datasets/webqsp/test-*.parquet}
+# Ours usually uses decomposed set (e.g. cwq_full/webqsp_full).
+OURS_CWQ_BASE=${OURS_CWQ_BASE:-datasets/cwq_full.jsonl}
+OURS_WEBQSP_BASE=${OURS_WEBQSP_BASE:-datasets/webqsp_full.jsonl}
+OURS_ALLOW_CLEAN_FALLBACK=${OURS_ALLOW_CLEAN_FALLBACK:-0}
 
 # Optional official test-set aliases (from HF snapshots / converted exports).
-# If *_CLEAN does not exist but these do, we auto-fallback to reduce setup mistakes.
 CWQ_PAPER_DEFAULT=${CWQ_PAPER_DEFAULT:-datasets/RoG-cwq_test.jsonl}
 WEBQSP_PAPER_DEFAULT=${WEBQSP_PAPER_DEFAULT:-datasets/RoG-webqsp_test.jsonl}
 
@@ -79,6 +85,38 @@ dataset_clean_file() {
       echo "${WEBQSP_PAPER_DEFAULT}"
     else
       echo "${WEBQSP_CLEAN}"
+    fi
+  fi
+}
+
+dataset_rand_base_file() {
+  local d="$1"
+  dataset_clean_file "$d"
+}
+
+dataset_ours_base_file() {
+  local d="$1"
+  local clean_file
+  clean_file="$(dataset_clean_file "$d")"
+  if [[ "$d" == "cwq" ]]; then
+    if [[ -f "${OURS_CWQ_BASE}" ]]; then
+      echo "${OURS_CWQ_BASE}"
+    else
+      if [[ "${OURS_ALLOW_CLEAN_FALLBACK}" == "1" ]]; then
+        echo "${clean_file}"
+      else
+        echo "${OURS_CWQ_BASE}"
+      fi
+    fi
+  else
+    if [[ -f "${OURS_WEBQSP_BASE}" ]]; then
+      echo "${OURS_WEBQSP_BASE}"
+    else
+      if [[ "${OURS_ALLOW_CLEAN_FALLBACK}" == "1" ]]; then
+        echo "${clean_file}"
+      else
+        echo "${OURS_WEBQSP_BASE}"
+      fi
     fi
   fi
 }
@@ -143,15 +181,11 @@ build_clean_from_parquet_if_needed() {
     output_file="datasets/clean_webqsp_from_parquet.jsonl"
   fi
 
-  if [[ -f "${output_file}" ]]; then
-    return 0
-  fi
+  [[ -f "${output_file}" ]] && return 0
 
   local parquet_files=()
   mapfile -t parquet_files < <(compgen -G "${glob_pattern}" || true)
-  if (( ${#parquet_files[@]} == 0 )); then
-    return 0
-  fi
+  (( ${#parquet_files[@]} == 0 )) && return 0
 
   echo "[${d}] build clean jsonl from parquet test shards (${#parquet_files[@]} files)"
   create_jsonl_from_parquet "${output_file}" "${parquet_files[@]}"
@@ -190,41 +224,46 @@ rule_stage() {
     --force
 }
 
-poison_stage() {
+poison_rand_stage() {
   local d="$1"
-  local clean_file
-  clean_file="$(dataset_clean_file "$d")"
+  local rand_file
+  rand_file="$(dataset_rand_base_file "$d")"
   local rf
   rf="$(rule_file "$d")"
 
-  # Rand attacker (default weakened to avoid floor-effect saturation)
   python src/attack_scripts_adaptive/poison_data_adaptive.py \
-    --input_file "$clean_file" \
+    --input_file "$rand_file" \
     --rule_file "$rf" \
     --output_file "datasets/poisoned_${d}_rand.jsonl" \
-    --api_key "$API_KEY" \
-    --api_base "$API_BASE" \
     --mode rand \
+    --inject_top_k "$RAND_INJECT_TOP_K" \
     --hop_repeat "$RAND_HOP_REPEAT" \
     --single_hop_repeat "$RAND_SINGLE_HOP_REPEAT" \
     --front_boost "$RAND_FRONT_BOOST" \
     --hop_boost_if_type_match "$RAND_HOP_BOOST_MATCH" \
     --hop_boost_if_type_mismatch "$RAND_HOP_BOOST_MISMATCH"
+}
 
-  # Ours attacker (keeps stronger defaults)
+poison_ours_stage() {
+  local d="$1"
+  local ours_file
+  ours_file="$(dataset_ours_base_file "$d")"
+  local rf
+  rf="$(rule_file "$d")"
+
   python src/attack_scripts_adaptive/poison_data_adaptive.py \
-    --input_file "$clean_file" \
+    --input_file "$ours_file" \
     --rule_file "$rf" \
     --output_file "datasets/poisoned_${d}_ours.jsonl" \
-    --api_key "$API_KEY" \
-    --api_base "$API_BASE" \
     --mode ours \
+    --inject_top_k "$OURS_INJECT_TOP_K" \
     --hop_repeat "$OURS_HOP_REPEAT" \
     --single_hop_repeat "$OURS_SINGLE_HOP_REPEAT" \
     --front_boost "$OURS_FRONT_BOOST" \
     --hop_boost_if_type_match "$OURS_HOP_BOOST_MATCH" \
     --hop_boost_if_type_mismatch "$OURS_HOP_BOOST_MISMATCH"
 }
+
 
 predict_once() {
   local data_path="$1"
@@ -244,22 +283,31 @@ predict_once() {
     --force
 }
 
-predict_stage() {
+predict_clean_stage() {
   local d="$1"
   local clean_file
   clean_file="$(dataset_clean_file "$d")"
   local rf
   rf="$(rule_file "$d")"
-
   predict_once "$clean_file" "${d}-clean-paper" "$rf"
+}
+
+predict_rand_stage() {
+  local d="$1"
+  local rf
+  rf="$(rule_file "$d")"
   predict_once "datasets/poisoned_${d}_rand.jsonl" "${d}-rand-paper" "$rf"
+}
+
+predict_ours_stage() {
+  local d="$1"
+  local rf
+  rf="$(rule_file "$d")"
   predict_once "datasets/poisoned_${d}_ours.jsonl" "${d}-ours-paper" "$rf"
 }
 
 table3_stage() {
   local d="$1"
-  local clean_file
-  clean_file="$(dataset_clean_file "$d")"
   local rule_postfix
   rule_postfix="$(echo "$(rule_file "$d")" | tr '/.' '__')"
 
@@ -270,7 +318,7 @@ table3_stage() {
     dataset_name="WebQSP"
   fi
 
-   python "$TABLE3_COLLECT_SCRIPT" \
+  python "$TABLE3_COLLECT_SCRIPT" \
     --dataset "$dataset_name" \
     --method "$MODEL_NAME" \
     --clean_pred "${PRED_ROOT}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
@@ -279,18 +327,13 @@ table3_stage() {
     --output_csv "${EVAL_ROOT}/table3_rows.csv"
 }
 
-
 validate_config() {
-  # Common shell typo guard: accidentally concatenating env vars on one line,
-  # e.g. MODEL_PATH=/path/to/modelDATASETS=cwq
   if [[ "$MODEL_PATH" == *"DATASETS="* || "$MODEL_PATH" == *"STAGES="* ]]; then
     echo "[error] MODEL_PATH looks malformed: ${MODEL_PATH}" >&2
     echo "        It seems environment variables were concatenated." >&2
-    echo "        Correct usage examples:" >&2
-    echo "          MODEL_PATH=/abs/path/to/RoG-model DATASETS=cwq bash scripts/run_table3_paper_aligned.sh" >&2
-    echo "          export MODEL_PATH=/abs/path/to/RoG-model; export DATASETS=cwq; bash scripts/run_table3_paper_aligned.sh" >&2
     exit 2
   fi
+
   if [[ ! -d "${MODEL_PATH}" ]]; then
     echo "[warn] MODEL_PATH does not look like a local model directory: ${MODEL_PATH}" >&2
     echo "       src/qa_prediction/gen_rule_path.py uses local_files_only=True, so weights must exist locally." >&2
@@ -315,6 +358,19 @@ validate_dataset() {
     exit 2
   fi
 
+  local ours_file
+  ours_file="$(dataset_ours_base_file "$d")"
+  if [[ -f "$ours_file" ]]; then
+    echo "[${d}] ours_base=${ours_file}"
+  else
+    if run_stage poison || run_stage poison_ours; then
+      echo "[error] Missing ours_base for ${d}: ${ours_file}" >&2
+      echo "        Set OURS_CWQ_BASE/OURS_WEBQSP_BASE correctly, or enable OURS_ALLOW_CLEAN_FALLBACK=1." >&2
+      exit 2
+    fi
+    echo "[${d}] ours_base missing (poison_ours not scheduled): ${ours_file}"
+  fi
+
   count="$(wc -l < "$clean_file" | tr -d ' ')"
   echo "[${d}] dataset=${clean_file} (#lines=${count}, expected≈${expected})"
   if [[ "$count" -lt $((expected - 200)) || "$count" -gt $((expected + 200)) ]]; then
@@ -322,21 +378,18 @@ validate_dataset() {
   fi
 }
 
+
 main() {
   mkdir -p "$RULE_ROOT" "$PRED_ROOT" "$EVAL_ROOT"
 
   validate_config
-  if [[ "$REQUIRE_API" == "1" && -z "$API_KEY" ]]; then
-    echo "[error] REQUIRE_API=1 but no API key was provided." >&2
-    echo "        Set API_KEY (or SILICONFLOW_API_KEY / OPENAI_API_KEY) before running." >&2
-    exit 2
-  fi
+
   echo "[config] MODEL_PATH=${MODEL_PATH}"
   echo "[config] DATASETS=${DATASETS}"
   echo "[config] STAGES=${STAGES}"
-  echo "[config] RAND repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
-  echo "[config] API enabled=$([[ -n \"$API_KEY\" ]] && echo yes || echo no), API_BASE=${API_BASE}"
-  echo "[config] OURS repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
+  echo "[config] OURS base cwq=${OURS_CWQ_BASE}, webqsp=${OURS_WEBQSP_BASE}, allow_clean_fallback=${OURS_ALLOW_CLEAN_FALLBACK}"
+  echo "[config] RAND topk=${RAND_INJECT_TOP_K}, repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
+  echo "[config] OURS topk=${OURS_INJECT_TOP_K}, repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
 
   for d in cwq webqsp; do
     run_dataset "$d" || continue
@@ -347,14 +400,29 @@ main() {
       rule_stage "$d"
     fi
 
-    if run_stage poison; then
-      echo "[$d] poison (rand + ours)"
-      poison_stage "$d"
+    if run_stage poison || run_stage poison_rand; then
+      echo "[$d] poison rand"
+      poison_rand_stage "$d"
     fi
 
-    if run_stage predict; then
-      echo "[$d] predict (clean + rand + ours)"
-      predict_stage "$d"
+    if run_stage poison || run_stage poison_ours; then
+      echo "[$d] poison ours"
+      poison_ours_stage "$d"
+    fi
+
+    if run_stage predict || run_stage predict_clean; then
+      echo "[$d] predict clean"
+      predict_clean_stage "$d"
+    fi
+
+    if run_stage predict || run_stage predict_rand; then
+      echo "[$d] predict rand"
+      predict_rand_stage "$d"
+    fi
+
+    if run_stage predict || run_stage predict_ours; then
+      echo "[$d] predict ours"
+      predict_ours_stage "$d"
     fi
 
     if run_stage table3; then
