@@ -140,6 +140,21 @@ DATASET_PATH, RULE_FILE, POISONED_DATASET_PATH, MODEL_PATH, PRED_ROOT, EVAL_REPO
 
 Results
 <img src="resources/results.png" width = "600" /> <img src="resources/plug-and-play.png" width = "600" /> <img src="resources/lack_of_knowledge.png" width = "600" /> <img src="resources/hallucination.png" width = "600" />
+
+Table-3 Reproduction (paper-aligned script)
+- Script: `bash scripts/run_table3_paper_aligned.sh`
+- The script expects local RoG model files (`MODEL_PATH`) because `gen_rule_path.py` loads with `local_files_only=True`.
+- Default clean-set paths are `datasets/clean_cwq.jsonl` and `datasets/clean_webqsp.jsonl`.
+  If these files are missing but raw official parquet shards exist, the script will auto-build:
+  - `datasets/clean_cwq_from_parquet.jsonl` from `datasets/cwq/test-*.parquet`
+  - `datasets/clean_webqsp_from_parquet.jsonl` from `datasets/webqsp/test-*.parquet`
+  (this is recommended when you downloaded datasets directly from HuggingFace without manual merge).
+  If these files are missing, the script now auto-falls back to:
+  - `datasets/RoG-cwq_test.jsonl`
+  - `datasets/RoG-webqsp_test.jsonl`
+- It also prints a dataset-size sanity line (`CWQ≈3531`, `WebQSP≈1639`).
+  If your size differs a lot, your Clean/Rand numbers are usually not directly comparable to Table 3.
+
 Bibinfo
 If you found this repo helpful, please help us by citing this paper:
 
