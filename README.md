@@ -166,6 +166,8 @@ Table-3 Reproduction (paper-aligned script)
   - `datasets/RoG-webqsp_test.jsonl`
 - It also prints a dataset-size sanity line (`CWQ≈3531`, `WebQSP≈1639`).
   If your size differs a lot, your Clean/Rand numbers are usually not directly comparable to Table 3.
+- Table-3 collector prefers `detailed_eval_result.jsonl` (if present) for Hit/F1/Precision/Recall
+  so metrics stay consistent with `predict_answer.py`'s built-in evaluator.
 
 Bibinfo
 If you found this repo helpful, please help us by citing this paper:
