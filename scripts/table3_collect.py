@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import csv
+import os
 import json
 import re
 import string
@@ -23,7 +24,15 @@ def match(pred: str, ans: str) -> bool:
 
 def parse_ranked_answers(prediction) -> List[str]:
     if isinstance(prediction, list):
-        return [str(x).strip() for x in prediction if str(x).strip()]
+        # Keep consistent with evaluate_results.py: deduplicate by frequency.
+        freq = {}
+        for p in prediction:
+            p = str(p).strip()
+            if not p:
+                continue
+            freq[p] = freq.get(p, 0) + 1
+        ranked = sorted(freq.items(), key=lambda x: x[1], reverse=True)
+        return [x[0] for x in ranked]
 
     txt = str(prediction or "").strip()
     if not txt:
@@ -38,9 +47,6 @@ def parse_ranked_answers(prediction) -> List[str]:
     if len(lines) > 1:
         cleaned = [re.sub(r"^\d+\.\s*", "", x).strip() for x in lines]
         return [x for x in cleaned if x]
-
-    if "," in txt:
-        return [x.strip() for x in txt.split(",") if x.strip()]
 
     return [txt]
 
@@ -110,6 +116,45 @@ def eval_file(path: str) -> Dict[str, float]:
         "em": em_sum * 100 / total,
     }
 
+def eval_from_detailed_file(path: str) -> Dict[str, float]:
+    """
+    Reuse metrics already computed by qa_prediction/evaluate_results.py
+    for Hit/F1/Precision/Recall, then combine with Hits@1/EM from raw predictions.
+    """
+    detailed_path = path.replace("predictions.jsonl", "detailed_eval_result.jsonl")
+    if not os.path.exists(detailed_path):
+        return {}
+
+    total = 0
+    hit_sum = 0.0
+    f1_sum = 0.0
+    p_sum = 0.0
+    r_sum = 0.0
+
+    with open(detailed_path, "r", encoding="utf-8") as f:
+        for line in f:
+            item = json.loads(line)
+            total += 1
+            hit_sum += float(item.get("hit", 0.0))
+            f1_sum += float(item.get("f1", 0.0))
+            p_sum += float(item.get("precission", item.get("precision", 0.0)))
+            r_sum += float(item.get("recall", 0.0))
+
+    if total == 0:
+        return {}
+
+    # Keep Hits@1 and EM from current parser on raw prediction file.
+    base = eval_file(path)
+    return {
+        "total": total,
+        "hit": hit_sum * 100 / total,
+        "f1": f1_sum * 100 / total,
+        "precision": p_sum * 100 / total,
+        "recall": r_sum * 100 / total,
+        "hits1": base["hits1"],
+        "em": base["em"],
+    }
+
 
 def main():
     ap = argparse.ArgumentParser(description="Collect Clean/Rand/Ours metrics into a Table-3 style CSV")
@@ -119,11 +164,15 @@ def main():
     ap.add_argument("--rand_pred", required=True)
     ap.add_argument("--ours_pred", required=True)
     ap.add_argument("--output_csv", default="results/evaluation/table3_rows.csv")
+    ap.add_argument("--prefer_detailed_eval", action="store_true",
+                    help="If detailed_eval_result.jsonl exists, reuse its Hit/F1/Precision/Recall.")
     args = ap.parse_args()
 
     rows = []
     for attacker, path in [("Clean", args.clean_pred), ("Rand", args.rand_pred), ("Ours", args.ours_pred)]:
-        m = eval_file(path)
+        m = eval_from_detailed_file(path) if args.prefer_detailed_eval else {}
+        if not m:
+            m = eval_file(path)
         rows.append({
             "Dataset": args.dataset,
             "KG-RAG": args.method,
@@ -154,4 +203,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
