@@ -36,6 +36,7 @@ OURS_HOP_BOOST_MISMATCH=${OURS_HOP_BOOST_MISMATCH:-0.7}
 RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 PRED_ROOT=${PRED_ROOT:-results/KGQA}
 EVAL_ROOT=${EVAL_ROOT:-results/evaluation}
+TABLE3_COLLECT_SCRIPT=${TABLE3_COLLECT_SCRIPT:-scripts/table3_collect.py}
 
 CWQ_CLEAN=${CWQ_CLEAN:-datasets/clean_cwq.jsonl}
 WEBQSP_CLEAN=${WEBQSP_CLEAN:-datasets/clean_webqsp.jsonl}
@@ -165,6 +166,7 @@ dataset_expected_size() {
   fi
 }
 
+
 rule_file() {
   local d="$1"
   local clean_file
@@ -268,7 +270,7 @@ table3_stage() {
     dataset_name="WebQSP"
   fi
 
-  python scripts/table3_collect.py \
+   python "$TABLE3_COLLECT_SCRIPT" \
     --dataset "$dataset_name" \
     --method "$MODEL_NAME" \
     --clean_pred "${PRED_ROOT}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
@@ -292,6 +294,12 @@ validate_config() {
   if [[ ! -d "${MODEL_PATH}" ]]; then
     echo "[warn] MODEL_PATH does not look like a local model directory: ${MODEL_PATH}" >&2
     echo "       src/qa_prediction/gen_rule_path.py uses local_files_only=True, so weights must exist locally." >&2
+  fi
+
+  if run_stage table3 && [[ ! -f "${TABLE3_COLLECT_SCRIPT}" ]]; then
+    echo "[error] Missing table3 collector script: ${TABLE3_COLLECT_SCRIPT}" >&2
+    echo "        Keep scripts/table3_collect.py, or remove table3 from STAGES." >&2
+    exit 2
   fi
 }
 
