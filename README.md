@@ -143,6 +143,8 @@ Results
 
 Table-3 Reproduction (paper-aligned script)
 - Script: `bash scripts/run_table3_paper_aligned.sh`
+- `scripts/table3_collect.py` is used by the `table3` stage to aggregate Clean/Rand/Ours into final CSV rows.
+  If you don't need CSV aggregation, you can run with `STAGES=rule,poison,predict`.
 - The script expects local RoG model files (`MODEL_PATH`) because `gen_rule_path.py` loads with `local_files_only=True`.
 - Default clean-set paths are `datasets/clean_cwq.jsonl` and `datasets/clean_webqsp.jsonl`.
   If these files are missing but raw official parquet shards exist, the script will auto-build:
