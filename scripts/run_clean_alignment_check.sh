@@ -15,6 +15,32 @@ PRED_ROOT=${PRED_ROOT:-results/KGQA}
 CWQ_CLEAN=${CWQ_CLEAN:-datasets/clean_cwq.jsonl}
 WEBQSP_CLEAN=${WEBQSP_CLEAN:-datasets/clean_webqsp.jsonl}
 
+model_sanity() {
+  local mp="$1"
+  echo "[model] MODEL_PATH=${mp}"
+  if [[ ! -d "$mp" ]]; then
+    echo "[model][error] path is not a directory." >&2
+    return 1
+  fi
+
+  local has_full=0
+  [[ -f "${mp}/pytorch_model.bin" || -f "${mp}/model.safetensors" || -f "${mp}/pytorch_model.bin.index.json" || -f "${mp}/model.safetensors.index.json" ]] && has_full=1
+  local has_adapter=0
+  [[ -f "${mp}/adapter_config.json" || -f "${mp}/adapter_model.bin" || -f "${mp}/adapter_model.safetensors" ]] && has_adapter=1
+
+  echo "[model] config.json: $([[ -f "${mp}/config.json" ]] && echo yes || echo no)"
+  echo "[model] full weights: $([[ "$has_full" == "1" ]] && echo yes || echo no)"
+  echo "[model] adapter files: $([[ "$has_adapter" == "1" ]] && echo yes || echo no)"
+
+  if [[ "$has_adapter" == "1" && "$has_full" == "0" ]]; then
+    echo "[model][warn] adapter-only checkpoint detected." >&2
+    echo "             current clean check uses predict_answer.py with Llama loader (full-model path)." >&2
+    echo "             if this is LoRA-only, scores can be far below paper unless merged/full weights are used." >&2
+  fi
+}
+
+model_sanity "$MODEL_PATH"
+
 run_dataset() {
   local d="$1"
   [[ ",${DATASETS}," == *",${d},"* ]]
@@ -54,4 +80,3 @@ for d in cwq webqsp; do
   echo "[${d}] eval: ${eval_txt}"
   [[ -f "$eval_txt" ]] && cat "$eval_txt"
 done
-
