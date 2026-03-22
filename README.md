@@ -148,6 +148,7 @@ Table-3 Reproduction (paper-aligned script)
 - You can also run attackers separately:
   - `STAGES=rule,poison_rand,predict_clean,predict_rand,table3`
   - `STAGES=rule,poison_ours,predict_clean,predict_ours,table3`
+  - `STAGES=diagnose,table3` (prints prediction-file diagnostics: total rows / empty predictions / multiline outputs).
 - Rand defaults in the script are intentionally mild (lower repeat / top-k) to reduce collapse and keep it closer to a baseline.
 - Rand uses clean test data by default; Ours can use decomposed data if present:
   - default `datasets/cwq_full.jsonl`
