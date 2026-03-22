@@ -41,6 +41,37 @@ model_sanity() {
 
 model_sanity "$MODEL_PATH"
 
+rule_sanity() {
+  local rf="$1"
+  python - "$rf" <<'PY'
+import json, sys, os
+path = sys.argv[1]
+if not os.path.exists(path):
+    print(f"[rule][error] missing: {path}")
+    raise SystemExit(0)
+total = 0
+non_empty = 0
+rule_cnt = 0
+with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+        total += 1
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        rules = item.get("rules", item.get("prediction", []))
+        if not isinstance(rules, list):
+            rules = [rules]
+        rules = [r for r in rules if str(r).strip()]
+        if rules:
+            non_empty += 1
+            rule_cnt += len(rules)
+avg = (rule_cnt / non_empty) if non_empty else 0.0
+cov = (non_empty * 100 / total) if total else 0.0
+print(f"[rule] total={total}, non_empty={non_empty} ({cov:.2f}%), avg_rules={avg:.2f}")
+PY
+}
+
 run_dataset() {
   local d="$1"
   [[ ",${DATASETS}," == *",${d},"* ]]
@@ -77,6 +108,8 @@ for d in cwq webqsp; do
 
   echo "[${d}] args: ${args_txt}"
   [[ -f "$args_txt" ]] && cat "$args_txt"
+  echo "[${d}] rule: ${rule_file}"
+  rule_sanity "$rule_file"
   echo "[${d}] eval: ${eval_txt}"
   [[ -f "$eval_txt" ]] && cat "$eval_txt"
 done
