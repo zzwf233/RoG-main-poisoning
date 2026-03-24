@@ -11,6 +11,7 @@ set -euo pipefail
 #
 # Advanced staged execution:
 #   STAGES=rule,poison_rand,predict_clean,predict_rand,table3
+#   STAGES=diagnose,table3
 
 STAGES=${STAGES:-"rule,poison,predict,table3"}
 DATASETS=${DATASETS:-"cwq,webqsp"}
@@ -40,6 +41,7 @@ RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 PRED_ROOT=${PRED_ROOT:-results/KGQA}
 EVAL_ROOT=${EVAL_ROOT:-results/evaluation}
 TABLE3_COLLECT_SCRIPT=${TABLE3_COLLECT_SCRIPT:-scripts/table3_collect.py}
+TABLE3_PREFER_DETAILED_EVAL=${TABLE3_PREFER_DETAILED_EVAL:-1}
 
 CWQ_CLEAN=${CWQ_CLEAN:-datasets/clean_cwq.jsonl}
 WEBQSP_CLEAN=${WEBQSP_CLEAN:-datasets/clean_webqsp.jsonl}
@@ -200,7 +202,6 @@ dataset_expected_size() {
   fi
 }
 
-
 rule_file() {
   local d="$1"
   local clean_file
@@ -317,13 +318,73 @@ table3_stage() {
     dataset_name="WebQSP"
   fi
 
+  local extra_collect_args=()
+  if [[ "${TABLE3_PREFER_DETAILED_EVAL}" == "1" ]]; then
+    extra_collect_args+=(--prefer_detailed_eval)
+  fi
+
   python "$TABLE3_COLLECT_SCRIPT" \
     --dataset "$dataset_name" \
     --method "$MODEL_NAME" \
     --clean_pred "${PRED_ROOT}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
     --rand_pred "${PRED_ROOT}/${d}-rand-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
     --ours_pred "${PRED_ROOT}/${d}-ours-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
-    --output_csv "${EVAL_ROOT}/table3_rows.csv"
+    --output_csv "${EVAL_ROOT}/table3_rows.csv" \
+    "${extra_collect_args[@]}"
+}
+
+diagnose_prediction_file() {
+  local path="$1"
+  local tag="$2"
+  if [[ ! -f "$path" ]]; then
+    echo "[diagnose] ${tag}: missing file: ${path}"
+    return 0
+  fi
+
+  python - "$path" "$tag" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+tag = sys.argv[2]
+total = 0
+empty_pred = 0
+multiline = 0
+json_error = 0
+
+with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+        total += 1
+        try:
+            item = json.loads(line)
+        except Exception:
+            json_error += 1
+            continue
+        pred = item.get("prediction", "")
+        if isinstance(pred, list):
+            pred_txt = "\n".join(str(x) for x in pred)
+        else:
+            pred_txt = str(pred)
+        if not pred_txt.strip():
+            empty_pred += 1
+        if "\n" in pred_txt.strip():
+            multiline += 1
+
+print(f"[diagnose] {tag}: total={total}, empty_prediction={empty_pred}, multiline_prediction={multiline}, json_error={json_error}")
+PY
+}
+
+diagnose_stage() {
+  local d="$1"
+  local rule_postfix
+  rule_postfix="$(echo "$(rule_file "$d")" | tr '/.' '__')"
+  local base="${PRED_ROOT}"
+  local clean_path="${base}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
+  local rand_path="${base}/${d}-rand-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
+  local ours_path="${base}/${d}-ours-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
+  diagnose_prediction_file "$clean_path" "${d}/clean"
+  diagnose_prediction_file "$rand_path" "${d}/rand"
+  diagnose_prediction_file "$ours_path" "${d}/ours"
 }
 
 validate_config() {
@@ -377,7 +438,6 @@ validate_dataset() {
   fi
 }
 
-
 main() {
   mkdir -p "$RULE_ROOT" "$PRED_ROOT" "$EVAL_ROOT"
 
@@ -389,7 +449,7 @@ main() {
   echo "[config] OURS base cwq=${OURS_CWQ_BASE}, webqsp=${OURS_WEBQSP_BASE}, allow_clean_fallback=${OURS_ALLOW_CLEAN_FALLBACK}"
   echo "[config] RAND topk=${RAND_INJECT_TOP_K}, repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
   echo "[config] OURS topk=${OURS_INJECT_TOP_K}, repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
-
+  echo "[config] TABLE3 prefer_detailed_eval=${TABLE3_PREFER_DETAILED_EVAL}"
   for d in cwq webqsp; do
     run_dataset "$d" || continue
     validate_dataset "$d"
@@ -427,6 +487,13 @@ main() {
     if run_stage table3; then
       echo "[$d] table3 collect"
       table3_stage "$d"
+    fi
+    if run_stage diagnose; then
+      diagnose_stage "$d"
+    fi
+    if run_stage diagnose; then
+      echo "[$d] diagnose prediction files"
+      diagnose_stage "$d"
     fi
   done
 
