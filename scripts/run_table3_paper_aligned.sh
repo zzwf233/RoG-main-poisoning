@@ -203,12 +203,24 @@ dataset_expected_size() {
 }
 
 rule_file() {
+  local data_file="$1"
+  local data_tag
+  data_tag="$(basename "$data_file" .jsonl)"
+  echo "${RULE_ROOT}/${data_tag}/${MODEL_NAME}/test/predictions_${N_BEAM}_False.jsonl"
+}
+
+rule_file_clean() {
   local d="$1"
   local clean_file
   clean_file="$(dataset_clean_file "$d")"
-  local clean_tag
-  clean_tag="$(basename "$clean_file" .jsonl)"
-  echo "${RULE_ROOT}/${clean_tag}/${MODEL_NAME}/test/predictions_${N_BEAM}_False.jsonl"
+  rule_file "$clean_file"
+}
+
+rule_file_ours() {
+  local d="$1"
+  local ours_file
+  ours_file="$(dataset_ours_base_file "$d")"
+  rule_file "$ours_file"
 }
 
 rule_stage() {
@@ -225,12 +237,31 @@ rule_stage() {
     --force
 }
 
+rule_stage_ours() {
+  local d="$1"
+  local ours_file clean_file
+  ours_file="$(dataset_ours_base_file "$d")"
+  clean_file="$(dataset_clean_file "$d")"
+  # If ours base equals clean base, avoid duplicate generation.
+  if [[ "$ours_file" == "$clean_file" ]]; then
+    return 0
+  fi
+  python src/qa_prediction/gen_rule_path.py \
+    --d "$ours_file" \
+    --split test \
+    --model_name "$MODEL_NAME" \
+    --model_path "$MODEL_PATH" \
+    --n_beam "$N_BEAM" \
+    --output_path "$RULE_ROOT" \
+    --force
+}
+
 poison_rand_stage() {
   local d="$1"
   local rand_file
   rand_file="$(dataset_rand_base_file "$d")"
   local rf
-  rf="$(rule_file "$d")"
+  rf="$(rule_file_clean "$d")"
 
   python src/attack_scripts_adaptive/poison_data_adaptive.py \
     --input_file "$rand_file" \
@@ -250,7 +281,7 @@ poison_ours_stage() {
   local ours_file
   ours_file="$(dataset_ours_base_file "$d")"
   local rf
-  rf="$(rule_file "$d")"
+  rf="$(rule_file_ours "$d")"
 
   python src/attack_scripts_adaptive/poison_data_adaptive.py \
     --input_file "$ours_file" \
@@ -288,28 +319,29 @@ predict_clean_stage() {
   local clean_file
   clean_file="$(dataset_clean_file "$d")"
   local rf
-  rf="$(rule_file "$d")"
+  rf="$(rule_file_clean "$d")"
   predict_once "$clean_file" "${d}-clean-paper" "$rf"
 }
 
 predict_rand_stage() {
   local d="$1"
   local rf
-  rf="$(rule_file "$d")"
+  rf="$(rule_file_clean "$d")"
   predict_once "datasets/poisoned_${d}_rand.jsonl" "${d}-rand-paper" "$rf"
 }
 
 predict_ours_stage() {
   local d="$1"
   local rf
-  rf="$(rule_file "$d")"
+  rf="$(rule_file_ours "$d")"
   predict_once "datasets/poisoned_${d}_ours.jsonl" "${d}-ours-paper" "$rf"
 }
 
 table3_stage() {
   local d="$1"
-  local rule_postfix
-  rule_postfix="$(echo "$(rule_file "$d")" | tr '/.' '__')"
+  local clean_rule_postfix ours_rule_postfix
+  clean_rule_postfix="$(echo "$(rule_file_clean "$d")" | tr '/.' '__')"
+  ours_rule_postfix="$(echo "$(rule_file_ours "$d")" | tr '/.' '__')"
 
   local dataset_name
   if [[ "$d" == "cwq" ]]; then
@@ -326,9 +358,9 @@ table3_stage() {
   python "$TABLE3_COLLECT_SCRIPT" \
     --dataset "$dataset_name" \
     --method "$MODEL_NAME" \
-    --clean_pred "${PRED_ROOT}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
-    --rand_pred "${PRED_ROOT}/${d}-rand-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
-    --ours_pred "${PRED_ROOT}/${d}-ours-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl" \
+    --clean_pred "${PRED_ROOT}/${d}-clean-paper/${MODEL_NAME}/test/${clean_rule_postfix}/predictions.jsonl" \
+    --rand_pred "${PRED_ROOT}/${d}-rand-paper/${MODEL_NAME}/test/${clean_rule_postfix}/predictions.jsonl" \
+    --ours_pred "${PRED_ROOT}/${d}-ours-paper/${MODEL_NAME}/test/${ours_rule_postfix}/predictions.jsonl" \
     --output_csv "${EVAL_ROOT}/table3_rows.csv" \
     "${extra_collect_args[@]}"
 }
@@ -376,12 +408,13 @@ PY
 
 diagnose_stage() {
   local d="$1"
-  local rule_postfix
-  rule_postfix="$(echo "$(rule_file "$d")" | tr '/.' '__')"
+  local clean_rule_postfix ours_rule_postfix
+  clean_rule_postfix="$(echo "$(rule_file_clean "$d")" | tr '/.' '__')"
+  ours_rule_postfix="$(echo "$(rule_file_ours "$d")" | tr '/.' '__')"
   local base="${PRED_ROOT}"
-  local clean_path="${base}/${d}-clean-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
-  local rand_path="${base}/${d}-rand-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
-  local ours_path="${base}/${d}-ours-paper/${MODEL_NAME}/test/${rule_postfix}/predictions.jsonl"
+  local clean_path="${base}/${d}-clean-paper/${MODEL_NAME}/test/${clean_rule_postfix}/predictions.jsonl"
+  local rand_path="${base}/${d}-rand-paper/${MODEL_NAME}/test/${clean_rule_postfix}/predictions.jsonl"
+  local ours_path="${base}/${d}-ours-paper/${MODEL_NAME}/test/${ours_rule_postfix}/predictions.jsonl"
   diagnose_prediction_file "$clean_path" "${d}/clean"
   diagnose_prediction_file "$rand_path" "${d}/rand"
   diagnose_prediction_file "$ours_path" "${d}/ours"
@@ -436,6 +469,49 @@ validate_dataset() {
   if [[ "$count" -lt $((expected - 200)) || "$count" -gt $((expected + 200)) ]]; then
     echo "[warn] ${d} sample count is far from paper test split; Clean/Rand may be non-comparable." >&2
   fi
+  python - "$d" "$clean_file" <<'PY'
+import json
+import sys
+from collections import Counter
+
+d = sys.argv[1]
+path = sys.argv[2]
+prefix_counter = Counter()
+total = 0
+
+with open(path, "r", encoding="utf-8") as f:
+    for line in f:
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        qid = str(item.get("id", "")).strip()
+        if not qid:
+            continue
+        total += 1
+        if qid.startswith("WebQ"):
+            prefix_counter["WebQ"] += 1
+        elif qid.startswith("CWQ"):
+            prefix_counter["CWQ"] += 1
+        else:
+            prefix_counter["Other"] += 1
+
+if total == 0:
+    print(f"[warn] {d} id-prefix check skipped: no valid ids in {path}", file=sys.stderr)
+    raise SystemExit(0)
+
+webq = prefix_counter["WebQ"]
+cwq = prefix_counter["CWQ"]
+other = prefix_counter["Other"]
+print(f"[{d}] id-prefix summary: WebQ={webq}, CWQ={cwq}, Other={other}, Total={total}")
+
+if d == "cwq" and webq > 0:
+    ratio = webq / total * 100
+    print(f"[warn] cwq clean file contains WebQ-like ids ({webq}/{total}, {ratio:.2f}%). Check dataset file mix-up.", file=sys.stderr)
+if d == "webqsp" and cwq > 0:
+    ratio = cwq / total * 100
+    print(f"[warn] webqsp clean file contains CWQ-like ids ({cwq}/{total}, {ratio:.2f}%). Check dataset file mix-up.", file=sys.stderr)
+PY
 }
 
 main() {
@@ -447,9 +523,10 @@ main() {
   echo "[config] DATASETS=${DATASETS}"
   echo "[config] STAGES=${STAGES}"
   echo "[config] OURS base cwq=${OURS_CWQ_BASE}, webqsp=${OURS_WEBQSP_BASE}, allow_clean_fallback=${OURS_ALLOW_CLEAN_FALLBACK}"
+  echo "[config] TABLE3 prefer_detailed_eval=${TABLE3_PREFER_DETAILED_EVAL}"
   echo "[config] RAND topk=${RAND_INJECT_TOP_K}, repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
   echo "[config] OURS topk=${OURS_INJECT_TOP_K}, repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
-  echo "[config] TABLE3 prefer_detailed_eval=${TABLE3_PREFER_DETAILED_EVAL}"
+
   for d in cwq webqsp; do
     run_dataset "$d" || continue
     validate_dataset "$d"
@@ -457,6 +534,10 @@ main() {
     if run_stage rule; then
       echo "[$d] rule"
       rule_stage "$d"
+      if run_stage poison || run_stage poison_ours || run_stage predict || run_stage predict_ours; then
+        echo "[$d] rule (ours base)"
+        rule_stage_ours "$d"
+      fi
     fi
 
     if run_stage poison || run_stage poison_rand; then
@@ -488,9 +569,7 @@ main() {
       echo "[$d] table3 collect"
       table3_stage "$d"
     fi
-    if run_stage diagnose; then
-      diagnose_stage "$d"
-    fi
+
     if run_stage diagnose; then
       echo "[$d] diagnose prediction files"
       diagnose_stage "$d"
