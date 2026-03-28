@@ -2,7 +2,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM  # 导入
 import torch
 from .base_language_model import BaseLanguageModel
 from transformers import LlamaTokenizer, LlamaForCausalLM  # 确保导入 LlamaForCausalLM 以备用
-
+from src.utils.tokenizer_utils import align_tokenizer_vocab_with_model
 
 class Llama(BaseLanguageModel):
     DTYPE = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -60,14 +60,18 @@ class Llama(BaseLanguageModel):
 
         # 1. 加载分词器：直接调用 self.load_model，让它自行处理 self.args.model_path
         self.tokenizer = self.load_model()  # <--- 移除参数，让 load_model 使用 self.args.model_path
-        # 与规则生成端保持一致：注入 RoG 特殊 token，并对齐模型 embedding 大小。
-        # 否则可能在 decode 阶段出现 piece id is out of range。
-        num_added = self.tokenizer.add_tokens(self.ROG_NEW_TOKENS)
-        if num_added > 0 or len(self.tokenizer) != self.model.get_input_embeddings().weight.size(0):
-            # NOTE: Keep embedding rows exactly equal to tokenizer size for HF/Accelerate hooks.
-            # Using pad_to_multiple_of here can create shape mismatches at runtime under device_map hooks.
-            self.model.resize_token_embeddings(len(self.tokenizer))
-
+        # 与规则生成端保持一致：注入 RoG 特殊 token，并自动补齐到模型词表长度。
+        # 这样可坚持使用 slow tokenizer，同时避免 decode 阶段出现 piece id is out of range。
+        added_base_tokens, added_padding_tokens, final_len = align_tokenizer_vocab_with_model(
+            tokenizer=self.tokenizer,
+            model=self.model,
+            base_special_tokens=self.ROG_NEW_TOKENS,
+        )
+        if added_base_tokens > 0 or added_padding_tokens > 0:
+            print(
+                f"[Tokenizer Align] added_base_tokens={added_base_tokens}, "
+                f"added_padding_tokens={added_padding_tokens}, final_len={final_len}"
+            )
         if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
