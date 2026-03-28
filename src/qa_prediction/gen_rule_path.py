@@ -7,6 +7,7 @@ import re
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import AutoPeftModelForCausalLM
+from src.utils.tokenizer_utils import align_tokenizer_vocab_with_model
 from datasets import load_dataset
 
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
@@ -94,15 +95,6 @@ def main(args):
         local_files_only=True
     )
 
-    # --- Tokenizer 修复 (防止 IndexError) ---
-    rog_new_tokens = ["<SEP>", "<PATH>", "</PATH>"]
-    num_added = tokenizer.add_tokens(rog_new_tokens)
-    print(f"Added {num_added} special tokens.")
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    # --------------------------------------
-
     if args.lora:
         print("Loading LoRA adapters...")
         model = AutoPeftModelForCausalLM.from_pretrained(
@@ -122,8 +114,21 @@ def main(args):
             local_files_only=True
         )
 
-    # 调整 Embedding 大小以匹配新 Token
-    model.resize_token_embeddings(len(tokenizer))
+    # --- Tokenizer 修复 (防止 IndexError / out-of-range) ---
+    rog_new_tokens = ["<SEP>", "<PATH>", "</PATH>"]
+    added_base_tokens, added_padding_tokens, final_len = align_tokenizer_vocab_with_model(
+        tokenizer=tokenizer,
+        model=model,
+        base_special_tokens=rog_new_tokens,
+    )
+    print(
+        f"Added base tokens={added_base_tokens}, "
+        f"padding special tokens={added_padding_tokens}, final tokenizer len={final_len}."
+    )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    # --------------------------------------------------------
     model.eval()
 
     # --- 准备输出 ---
