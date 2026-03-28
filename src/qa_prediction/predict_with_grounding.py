@@ -6,6 +6,7 @@ import networkx as nx
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 from peft import AutoPeftModelForCausalLM
+from src.utils.tokenizer_utils import align_tokenizer_vocab_with_model
 
 # 定义 Llama2 提示模板
 PROMPT_TEMPLATE = "[INST] <<SYS>>\n<</SYS>>\nBased on the reasoning paths, please answer the given question. Please keep the answer as simple as possible and return all the possible answers as a list.\n\nReasoning Paths:\n{paths}\n\nQuestion:\n{question} [/INST]"
@@ -52,44 +53,46 @@ def build_graph(triplets):
 
 
 def get_paths(G, start_nodes, rules, sample_id=None):
-    """
-    根据规则在图 G 中从 start_nodes 开始搜索路径
-    """
     paths = []
-
-    # 调试标记：是否打印详细日志
-    debug_mode = (sample_id == "WebQTest-0")
-    if debug_mode:
-        print(f"\n[DEBUG] Searching paths for {sample_id}")
-        print(f"  Start Nodes: {start_nodes}")
-        print(f"  Rules: {rules}")
-
     for rule in rules:
-        # RoG 的规则通常是 "relation1.relation2" 格式
-        # 简化处理：我们假设规则就是 edge 上的 relation 属性
-        # 如果是多跳规则，需要 split。但在 WebQSP 中通常是 1-hop 或 2-hop。
+        # 【关键解析修复】: 兼容 RoG 常见的多种分隔符
+        if isinstance(rule, str):
+            # 将 <pad>, <SEP>, 点号 全部替换为标准分隔符
+            clean_rule = rule.replace("<pad>", "|").replace("<SEP>", "|").replace(" ", "|")
+            rel_steps = [r.strip() for r in clean_rule.split("|") if r.strip()]
+        else:
+            rel_steps = rule
 
-        # 这里实现一个简单的 BFS 匹配
-        # 目前只支持 1-hop 匹配 (根据你的 debug 结果，毒是 1-hop 的)
+        def dfs(curr_node, step_idx, path_nodes):
+            if step_idx == len(rel_steps):
+                # 将 ID 转换为名字（如果图里有名字的话）
+                readable_path = []
+                for i in range(len(path_nodes) - 1):
+                    u, v = path_nodes[i], path_nodes[i + 1]
+                    rel = rel_steps[i]
+                    # 尝试获取节点名称，没名字就用 ID
+                    u_name = G.nodes[u].get('name', u)
+                    readable_path.append(f"{u_name} -> {rel}")
 
-        for start_node in start_nodes:
-            if start_node not in G:
-                continue
+                # 最后一跳
+                last_node_name = G.nodes[path_nodes[-1]].get('name', path_nodes[-1])
+                paths.append(" -> ".join(readable_path) + f" -> {last_node_name}")
+                return
 
-            for neighbor in G.neighbors(start_node):
-                edges = G.get_edge_data(start_node, neighbor)
-                for k, v in edges.items():
-                    rel = v.get('relation', '')
+            target_rel = rel_steps[step_idx]
+            if curr_node in G:
+                for neighbor in G.neighbors(curr_node):
+                    edge_data = G.get_edge_data(curr_node, neighbor)
+                    for k, v in edge_data.items():
+                        if v.get('relation') == target_rel:
+                            dfs(neighbor, step_idx + 1, path_nodes + [neighbor])
 
-                    # 核心匹配逻辑
-                    if rel == rule:
-                        path_str = f"{start_node} -> {rel} -> {neighbor}"
-                        paths.append(path_str)
+        for start in start_nodes:
+            # 预处理：把图里的 name 属性存入节点，方便读取
+            # 这里需要你在 build_graph 时把 type.object.name 存入 node attr
+            dfs(start, 0, [start])
 
-                        if debug_mode:
-                            print(f"  ✅ MATCH: {path_str}")
-
-    return list(set(paths))
+    return list(set(paths))[:15]
 
 
 def main(args):
@@ -102,6 +105,20 @@ def main(args):
         model = AutoPeftModelForCausalLM.from_pretrained(args.model_path, device_map="auto", torch_dtype=torch.float16)
     else:
         model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map="auto", torch_dtype=torch.float16)
+
+    rog_new_tokens = ["<SEP>", "<PATH>", "</PATH>"]
+    added_base_tokens, added_padding_tokens, final_len = align_tokenizer_vocab_with_model(
+        tokenizer=tokenizer,
+        model=model,
+        base_special_tokens=rog_new_tokens,
+    )
+    print(
+        f"[Tokenizer Align] added_base_tokens={added_base_tokens}, "
+        f"added_padding_tokens={added_padding_tokens}, final_len={final_len}"
+    )
+
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     model.eval()
 
