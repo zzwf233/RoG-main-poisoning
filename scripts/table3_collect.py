@@ -21,6 +21,11 @@ def normalize(s: str) -> str:
 def match(pred: str, ans: str) -> bool:
     return normalize(ans) in normalize(pred)
 
+def eval_acc(pred: str, answers: List[str]) -> float:
+    if not answers:
+        return 0.0
+    matched = sum(1 for a in answers if match(pred, a))
+    return matched / len(answers)
 
 def parse_ranked_answers(prediction) -> List[str]:
     if isinstance(prediction, list):
@@ -65,6 +70,7 @@ def eval_f1(pred_list: List[str], answers: List[str]):
 
 def eval_file(path: str) -> Dict[str, float]:
     total = 0
+    acc_sum = 0.0
     hit_sum = 0.0
     f1_sum = 0.0
     p_sum = 0.0
@@ -88,6 +94,7 @@ def eval_file(path: str) -> Dict[str, float]:
 
             total += 1
             pred_join = " ".join(preds)
+            acc = eval_acc(pred_join, answers)
             hit = 1.0 if any(match(pred_join, a) for a in answers) else 0.0
             f1, p, r = eval_f1(preds, answers)
 
@@ -96,6 +103,7 @@ def eval_file(path: str) -> Dict[str, float]:
             top1_norm = normalize(top1)
             em = 1.0 if any(top1_norm == normalize(a) for a in answers) else 0.0
 
+            acc_sum += acc
             hit_sum += hit
             f1_sum += f1
             p_sum += p
@@ -104,10 +112,11 @@ def eval_file(path: str) -> Dict[str, float]:
             em_sum += em
 
     if total == 0:
-        return {"total": 0, "hit": 0, "f1": 0, "precision": 0, "recall": 0, "hits1": 0, "em": 0}
+        return {"total": 0, "accuracy": 0, "hit": 0, "f1": 0, "precision": 0, "recall": 0, "hits1": 0, "em": 0}
 
     return {
         "total": total,
+        "accuracy": acc_sum * 100 / total,
         "hit": hit_sum * 100 / total,
         "f1": f1_sum * 100 / total,
         "precision": p_sum * 100 / total,
@@ -126,6 +135,7 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
         return {}
 
     total = 0
+    acc_sum = 0.0
     hit_sum = 0.0
     f1_sum = 0.0
     p_sum = 0.0
@@ -135,6 +145,7 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
         for line in f:
             item = json.loads(line)
             total += 1
+            acc_sum += float(item.get("acc", 0.0))
             hit_sum += float(item.get("hit", 0.0))
             f1_sum += float(item.get("f1", 0.0))
             p_sum += float(item.get("precission", item.get("precision", 0.0)))
@@ -147,6 +158,7 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
     base = eval_file(path)
     return {
         "total": total,
+        "accuracy": acc_sum * 100 / total,
         "hit": hit_sum * 100 / total,
         "f1": f1_sum * 100 / total,
         "precision": p_sum * 100 / total,
@@ -154,7 +166,6 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
         "hits1": base["hits1"],
         "em": base["em"],
     }
-
 
 def main():
     ap = argparse.ArgumentParser(description="Collect Clean/Rand/Ours metrics into a Table-3 style CSV")
@@ -178,6 +189,7 @@ def main():
             "KG-RAG": args.method,
             "Attacker": attacker,
             "#Eval": m["total"],
+            "Accuracy": round(m["accuracy"], 2),
             "Hit": round(m["hit"], 2),
             "F1": round(m["f1"], 2),
             "Precision": round(m["precision"], 2),
