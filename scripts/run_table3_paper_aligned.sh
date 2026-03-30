@@ -7,6 +7,7 @@ set -euo pipefail
 # Usage:
 #   bash scripts/run_table3_paper_aligned.sh
 #   MODEL_PATH=/path/to/your/RoG-model bash scripts/run_table3_paper_aligned.sh
+#   RULE_MODEL_PATH=./RoG-model PRED_MODEL_PATH=./Llama-2-7b-chat-hf bash scripts/run_table3_paper_aligned.sh
 #   DATASETS=cwq STAGES=rule,poison,predict,table3 bash scripts/run_table3_paper_aligned.sh
 #
 # Advanced staged execution:
@@ -18,6 +19,8 @@ DATASETS=${DATASETS:-"cwq,webqsp"}
 
 MODEL_NAME=${MODEL_NAME:-RoG}
 MODEL_PATH=${MODEL_PATH:-./RoG-model}
+RULE_MODEL_PATH=${RULE_MODEL_PATH:-${MODEL_PATH}}
+PRED_MODEL_PATH=${PRED_MODEL_PATH:-${MODEL_PATH}}
 PROMPT_PATH=${PROMPT_PATH:-prompts/llama2_predict.txt}
 N_BEAM=${N_BEAM:-3}
 
@@ -231,7 +234,7 @@ rule_stage() {
     --d "$clean_file" \
     --split test \
     --model_name "$MODEL_NAME" \
-    --model_path "$MODEL_PATH" \
+    --model_path "$RULE_MODEL_PATH" \
     --n_beam "$N_BEAM" \
     --output_path "$RULE_ROOT" \
     --force
@@ -250,7 +253,7 @@ rule_stage_ours() {
     --d "$ours_file" \
     --split test \
     --model_name "$MODEL_NAME" \
-    --model_path "$MODEL_PATH" \
+    --model_path "$RULE_MODEL_PATH" \
     --n_beam "$N_BEAM" \
     --output_path "$RULE_ROOT" \
     --force
@@ -306,7 +309,7 @@ predict_once() {
     --d "$d_name" \
     --split test \
     --model_name "$MODEL_NAME" \
-    --model_path "$MODEL_PATH" \
+    --model_path "$PRED_MODEL_PATH" \
     --prompt_path "$PROMPT_PATH" \
     --add_rule \
     --rule_path "$rf" \
@@ -427,9 +430,24 @@ validate_config() {
     exit 2
   fi
 
-  if [[ ! -d "${MODEL_PATH}" ]]; then
-    echo "[warn] MODEL_PATH does not look like a local model directory: ${MODEL_PATH}" >&2
+  if [[ "$RULE_MODEL_PATH" == *"DATASETS="* || "$RULE_MODEL_PATH" == *"STAGES="* ]]; then
+    echo "[error] RULE_MODEL_PATH looks malformed: ${RULE_MODEL_PATH}" >&2
+    exit 2
+  fi
+
+  if [[ "$PRED_MODEL_PATH" == *"DATASETS="* || "$PRED_MODEL_PATH" == *"STAGES="* ]]; then
+    echo "[error] PRED_MODEL_PATH looks malformed: ${PRED_MODEL_PATH}" >&2
+    exit 2
+  fi
+
+  if [[ ! -d "${RULE_MODEL_PATH}" ]]; then
+    echo "[warn] RULE_MODEL_PATH does not look like a local model directory: ${RULE_MODEL_PATH}" >&2
     echo "       src/qa_prediction/gen_rule_path.py uses local_files_only=True, so weights must exist locally." >&2
+  fi
+
+  if [[ ! -d "${PRED_MODEL_PATH}" ]]; then
+    echo "[warn] PRED_MODEL_PATH does not look like a local model directory: ${PRED_MODEL_PATH}" >&2
+    echo "       src/qa_prediction/predict_answer.py LLM loading expects local model path for local inference." >&2
   fi
 
   if run_stage table3 && [[ ! -f "${TABLE3_COLLECT_SCRIPT}" ]]; then
@@ -505,18 +523,21 @@ cwq = prefix_counter["CWQ"]
 other = prefix_counter["Other"]
 print(f"[{d}] id-prefix summary: WebQ={webq}, CWQ={cwq}, Other={other}, Total={total}")
 
-if d == "cwq" and webq > 0:
-    ratio = webq / total * 100
-    print(f"[warn] cwq clean file contains WebQ-like ids ({webq}/{total}, {ratio:.2f}%). Check dataset file mix-up.", file=sys.stderr)
+# NOTE:
+# In many released CWQ exports for this project, ids can still start with "WebQ*".
+# So for CWQ this prefix is only informational and should not trigger a hard warning.
 if d == "webqsp" and cwq > 0:
     ratio = cwq / total * 100
     print(f"[warn] webqsp clean file contains CWQ-like ids ({cwq}/{total}, {ratio:.2f}%). Check dataset file mix-up.", file=sys.stderr)
 PY
 }
 
+
 main() {
   mkdir -p "$RULE_ROOT" "$PRED_ROOT" "$EVAL_ROOT"
-
+  echo "[config] MODEL_NAME=${MODEL_NAME}"
+  echo "[config] RULE_MODEL_PATH=${RULE_MODEL_PATH}"
+  echo "[config] PRED_MODEL_PATH=${PRED_MODEL_PATH}"
   validate_config
 
   echo "[config] MODEL_PATH=${MODEL_PATH}"
