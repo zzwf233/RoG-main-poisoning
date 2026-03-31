@@ -2,7 +2,6 @@ from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM  # 导入
 import torch
 from .base_language_model import BaseLanguageModel
 from transformers import LlamaTokenizer, LlamaForCausalLM  # 确保导入 LlamaForCausalLM 以备用
-from src.utils.tokenizer_utils import align_tokenizer_vocab_with_model
 try:
     from src.utils.tokenizer_utils import align_tokenizer_vocab_with_model
 except ModuleNotFoundError:
@@ -16,7 +15,7 @@ class Llama(BaseLanguageModel):
     def add_args(parser):
         parser.add_argument('--model_path', type=str, help="HUGGING FACE MODEL or model path",
                             default='meta-llama/Llama-2-7b-chat-hf')
-        parser.add_argument('--max_new_tokens', type=int, help="max length", default=512)
+        parser.add_argument('--max_new_tokens', type=int, help="max length", default=128)
         parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='fp16')
 
     def __init__(self, args):
