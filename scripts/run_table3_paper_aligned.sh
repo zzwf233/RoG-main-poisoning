@@ -201,7 +201,7 @@ dataset_expected_size() {
   if [[ "$d" == "cwq" ]]; then
     echo "3531"
   else
-    echo "1639"
+    echo "1628"
   fi
 }
 
