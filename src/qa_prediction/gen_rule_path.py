@@ -46,28 +46,30 @@ def get_output_file(path, force=False):
 # ==============================================================================
 def parse_prediction(prediction_text):
     """
-    解析模型输出，提取规则 (增强鲁棒版 - 治本)
+    返回 list-of-list，每条路径是 relation 序列，例如:
+    [["a.b.c", "d.e.f"], ["x.y.z"]]
     """
-    # 策略：提取所有形如 "word.word.word" 的字符串
-    # 允许字母、数字、下划线，中间必须有点号
-    # 解释：RoG 的关系都是这种格式，例如 people.person.born_in
-    pattern = r"([a-z0-9_]+\.[a-z0-9_]+(?:\.[a-z0-9_]+)*)"
+    clean = prediction_text.replace("<pad>", "").replace("<s>", "").replace("</s>", "").strip()
 
-    # 清洗掉一些干扰字符
-    clean_text = prediction_text.replace("<pad>", "").replace("<s>", "").replace("</s>", "")
+    # 尝试按行/分号切片，每一片里抽 relation token
+    segments = re.split(r"[\n;]+", clean)
+    paths = []
+    rel_pat = r"[a-z0-9_]+\.[a-z0-9_]+(?:\.[a-z0-9_]+)*"
 
-    # 查找所有匹配项
-    matches = re.findall(pattern, clean_text)
+    for seg in segments:
+        rels = re.findall(rel_pat, seg.lower())
+        if rels:
+            paths.append(rels)
 
-    rules = []
-    for m in matches:
-        m = m.strip()
-        # 简单的过滤：必须包含点号，且长度大于5（避免匹配到无关的短词或文件名）
-        if "." in m and len(m) > 5:
-            rules.append(m)
-
-    # 去重并返回
-    return list(set(rules))
+    # 去重但保序
+    uniq = []
+    seen = set()
+    for p in paths:
+        t = tuple(p)
+        if t not in seen:
+            seen.add(t)
+            uniq.append(p)
+    return uniq
 
 
 def main(args):
@@ -189,7 +191,13 @@ def main(args):
             if rules:
                 all_rules.extend(rules)
 
-        unique_rules = list(set(all_rules))
+        unique_rules = []
+        seen = set()
+        for r in all_rules:
+            key = tuple(r) if isinstance(r, list) else r
+            if key not in seen:
+                seen.add(key)
+                unique_rules.append(r)
 
         result_item = {
             "id": sample_id,
