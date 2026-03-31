@@ -95,7 +95,8 @@ def eval_file(path: str) -> Dict[str, float]:
             total += 1
             pred_join = " ".join(preds)
             acc = eval_acc(pred_join, answers)
-            hit = 1.0 if any(match(pred_join, a) for a in answers) else 0.0
+            # Unify with paper-oriented comparison: use top-1 hit as the main "Hit".
+            hit = 1.0 if any(match(preds[0], a) for a in answers) else 0.0
             f1, p, r = eval_f1(preds, answers)
 
             top1 = preds[0]
@@ -128,7 +129,7 @@ def eval_file(path: str) -> Dict[str, float]:
 def eval_from_detailed_file(path: str) -> Dict[str, float]:
     """
     Reuse metrics already computed by qa_prediction/evaluate_results.py
-    for Hit/F1/Precision/Recall, then combine with Hits@1/EM from raw predictions.
+    for Hits@1/F1/Precision/Recall, then combine with Hits@1/EM from raw predictions.
     """
     detailed_path = path.replace("predictions.jsonl", "detailed_eval_result.jsonl")
     if not os.path.exists(detailed_path):
@@ -146,7 +147,7 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
             item = json.loads(line)
             total += 1
             acc_sum += float(item.get("acc", 0.0))
-            hit_sum += float(item.get("hit", 0.0))
+            hit_sum += float(item.get("hits1", item.get("hit", 0.0)))
             f1_sum += float(item.get("f1", 0.0))
             p_sum += float(item.get("precission", item.get("precision", 0.0)))
             r_sum += float(item.get("recall", 0.0))
@@ -166,6 +167,7 @@ def eval_from_detailed_file(path: str) -> Dict[str, float]:
         "hits1": base["hits1"],
         "em": base["em"],
     }
+
 
 def main():
     ap = argparse.ArgumentParser(description="Collect Clean/Rand/Ours metrics into a Table-3 style CSV")
