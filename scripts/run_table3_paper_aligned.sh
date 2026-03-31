@@ -205,6 +205,15 @@ dataset_expected_size() {
   fi
 }
 
+paper_default_file() {
+  local d="$1"
+  if [[ "$d" == "cwq" ]]; then
+    echo "${CWQ_PAPER_DEFAULT}"
+  else
+    echo "${WEBQSP_PAPER_DEFAULT}"
+  fi
+}
+
 rule_file() {
   local data_file="$1"
   local data_tag
@@ -483,9 +492,12 @@ validate_dataset() {
   fi
 
   count="$(wc -l < "$clean_file" | tr -d ' ')"
-  echo "[${d}] dataset=${clean_file} (#lines=${count}, expected≈${expected})"
+  local paper_file
+  paper_file="$(paper_default_file "$d")"
+  echo "[${d}] dataset=${clean_file} (#lines=${count})"
+  echo "[${d}] paper_ref=${paper_file} (expected≈${expected})"
   if [[ "$count" -lt $((expected - 200)) || "$count" -gt $((expected + 200)) ]]; then
-    echo "[warn] ${d} sample count is far from paper test split; Clean/Rand may be non-comparable." >&2
+    echo "[warn] ${d} current clean file line count differs from paper_ref scale; compare with caution." >&2
   fi
   python - "$d" "$clean_file" <<'PY'
 import json
