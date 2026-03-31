@@ -71,6 +71,28 @@ def parse_prediction(prediction_text):
             uniq.append(p)
     return uniq
 
+def verify_rules(sample, rules, min_support=1, max_paths_per_rule=3):
+    graph_data = sample.get("graph", [])
+    q_entities = sample.get("q_entity", [])
+    if not graph_data or not q_entities:
+        return rules, {}
+
+    graph = utils.build_graph(graph_data)
+    kept_rules = []
+    support_stats = {}
+
+    for rule in rules:
+        if not isinstance(rule, list) or len(rule) == 0:
+            continue
+        support = 0
+        for entity in q_entities:
+            support += len(utils.bfs_with_rule(graph, entity, rule, max_p=max_paths_per_rule))
+            if support >= min_support:
+                break
+        support_stats[" -> ".join(rule)] = support
+        if support >= min_support:
+            kept_rules.append(rule)
+    return kept_rules, support_stats
 
 def main(args):
     # --- 加载数据 ---
@@ -205,6 +227,16 @@ def main(args):
             "prediction": raw_predictions,
             "rules": unique_rules
         }
+        if args.verify_rules:
+            verified_rules, support_stats = verify_rules(
+                sample=sample,
+                rules=unique_rules,
+                min_support=args.min_rule_support,
+                max_paths_per_rule=args.max_paths_per_rule,
+            )
+            # 避免过拟合过滤导致没有规则可用：空结果回退原规则
+            result_item["rules"] = verified_rules if verified_rules else unique_rules
+            result_item["rule_support"] = support_stats
 
         fout.write(json.dumps(result_item) + "\n")
         fout.flush()
@@ -225,6 +257,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_beam", type=int, default=3)
     parser.add_argument("--force", "-f", action="store_true")
     parser.add_argument("--lora", action="store_true")
+    parser.add_argument("--verify_rules", action="store_true", help="verify generated rules with BFS support")
+    parser.add_argument("--min_rule_support", type=int, default=1, help="minimum bfs paths required to keep a rule")
+    parser.add_argument("--max_paths_per_rule", type=int, default=3, help="max bfs paths per rule when verifying")
 
     args = parser.parse_args()
     main(args)
