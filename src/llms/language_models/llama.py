@@ -78,10 +78,34 @@ class Llama(BaseLanguageModel):
         # 与规则生成端保持一致：注入 RoG 特殊 token，并自动补齐到模型词表长度。
         # 但若模型已被 accelerate/device_map hooks 分片，运行时再 resize 可能触发 shape mismatch。
         has_accelerate_hooks = any(hasattr(m, "_hf_hook") for m in self.model.modules())
+        model_vocab_size = self.model.get_input_embeddings().weight.size(0)
+
         if has_accelerate_hooks:
+            # 关键：有 hooks 时不要 resize model，但必须保证 tokenizer 长度 >= model vocab
+            # 否 decode 会出现 piece id out of range
+            missing = model_vocab_size - len(self.tokenizer)
+
+            if missing > 0:
+                # 优先补 RoG 相关 token（若缺失）
+                vocab = self.tokenizer.get_vocab()
+                preferred = [t for t in self.ROG_NEW_TOKENS if t not in vocab]
+
+                to_add = preferred[:missing]
+                while len(to_add) < missing:
+                    to_add.append(f"<ROG_EXTRA_SPECIAL_{len(to_add)}>")
+
+                self.tokenizer.add_special_tokens({"additional_special_tokens": to_add})
+
+            # 防御性兜底：如果 tokenizer 仍小于 model vocab，继续补齐
+            while len(self.tokenizer) < model_vocab_size:
+                k = len(self.tokenizer) - model_vocab_size + 1
+                self.tokenizer.add_special_tokens(
+                    {"additional_special_tokens": [f"<ROG_EXTRA_PAD_{abs(k)}>"]}
+                )
+
             print(
-                "[Tokenizer Align] Detected accelerate hooks; skip runtime resize to avoid "
-                "lm_head/embed shape mismatch under device_map."
+                f"[Tokenizer Align-hooks] tokenizer_len={len(self.tokenizer)}, "
+                f"model_vocab={model_vocab_size} (no resize under hooks)"
             )
         else:
             added_base_tokens, added_padding_tokens, final_len = align_tokenizer_vocab_with_model(
@@ -94,9 +118,6 @@ class Llama(BaseLanguageModel):
                     f"[Tokenizer Align] added_base_tokens={added_base_tokens}, "
                     f"added_padding_tokens={added_padding_tokens}, final_len={final_len}"
                 )
-
-        if self.tokenizer.pad_token is None and self.tokenizer.eos_token is not None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # 2. 初始化 pipeline
         # pipeline 不再需要从 args.model_path 下载模型，因为它将接收 self.model
