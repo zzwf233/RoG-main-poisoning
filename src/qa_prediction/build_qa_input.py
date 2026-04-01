@@ -175,7 +175,7 @@ class PromptBuilder(object):
                         reasoning_paths = self.apply_rules(graph, rules, entities)
                         lists_of_paths = [utils.path_to_string(p) for p in reasoning_paths]
 
-        # context = "\n".join(lists_of_paths) # 原代码注释掉的
+            # context = "\n".join(lists_of_paths) # 原代码注释掉的
 
             poison_target = question_dict.get("poison_target", question_dict.get("poison_target_entity", ""))
             is_poisoned = bool(question_dict.get("is_poisoned", False))
@@ -248,7 +248,13 @@ class PromptBuilder(object):
             # 只有当 lists_of_paths 不为空时才处理 context
             if lists_of_paths:
                 priority_terms = [str(question_dict.get("poison_target", "")), str(question_dict.get("poison_target_entity", ""))]
-                context = self.check_prompt_length(other_prompt, lists_of_paths, self.maximun_token, priority_terms=priority_terms)
+                context = self.check_prompt_length(
+                    other_prompt,
+                    lists_of_paths,
+                    self.maximun_token,
+                    priority_terms=priority_terms,
+                    question_text=question
+                )
             else:
                 context = ""
 
@@ -258,29 +264,61 @@ class PromptBuilder(object):
 
         return input
 
-    def check_prompt_length(self, prompt, list_of_paths, maximun_token, priority_terms=None):
-       '''Check whether the input prompt is too long. Keep prioritized paths first when truncating.'''
-       all_paths = "\n".join(list_of_paths)
-       all_tokens = prompt + all_paths
-       if self.tokenize(all_tokens) < maximun_token:
-           return all_paths
-       else:
+    def check_prompt_length(self, prompt, list_of_paths, maximun_token, priority_terms=None, question_text=""):
+        """先排序后截断：提高证据密度"""
+        all_paths = "\n".join(list_of_paths)
+        all_tokens = prompt + all_paths
+        if self.tokenize(all_tokens) < maximun_token:
+            return all_paths
+
         priority_terms = [str(x).strip().lower() for x in (priority_terms or []) if str(x).strip()]
 
-        def path_score(path_str: str) -> int:
-            s = str(path_str).lower()
-            sc = 0
-            for t in priority_terms:
-                if t and t in s:
-                    sc += 10
-            # Prefer slightly shorter paths to retain more evidence under token budget.
-            sc -= max(0, len(str(path_str)) // 200)
-            return sc
+        # 非停用词关键词（很轻量）
+        stop = {"the","a","an","is","are","was","were","in","on","at","of","to","for","and","or","what","which","who","where","when","how","does","did","do"}
+        q_terms = [w for w in re.findall(r"[a-z0-9_]+", str(question_text).lower()) if w not in stop and len(w) > 2]
+        q_terms = set(q_terms)
 
-        ranked_paths = sorted(list_of_paths, key=path_score, reverse=True)
-        if not ranked_paths:
-            ranked_paths = list(list_of_paths)
-            random.shuffle(ranked_paths)
+        # 高频关系惩罚（可以后续统计替换）
+        high_freq_rel_hints = {"type.object.type", "common.topic.notable_types"}
+
+        seen = set()
+        unique_paths = []
+        for p in list_of_paths:
+            ps = str(p).strip()
+            if ps not in seen:
+                seen.add(ps)
+                unique_paths.append(ps)
+
+        def path_score(path_str: str) -> float:
+            s = path_str.lower()
+            score = 0.0
+
+            # 1) poison/priority 命中
+            for t in priority_terms:
+                if t in s:
+                    score += 8.0
+
+            # 2) question 关键词命中
+            qt_hit = sum(1 for t in q_terms if t in s)
+            score += qt_hit * 1.5
+
+            # 3) 关系数量（太短偏泛化）
+            rels = [x.strip() for x in s.split("->")]
+            score += min(len(rels), 4) * 0.8
+            if len(rels) <= 1:
+                score -= 1.5
+
+            # 4) 高频泛化关系惩罚
+            for h in high_freq_rel_hints:
+                if h in s:
+                    score -= 1.0
+
+            # 5) 超长路径轻惩罚
+            score -= max(0, len(path_str) // 180) * 0.2
+
+            return score
+
+        ranked_paths = sorted(unique_paths, key=path_score, reverse=True)
 
         new_list_of_paths = []
         for p in ranked_paths:
