@@ -72,52 +72,26 @@ def parse_prediction(prediction_text):
     return uniq
 
 def verify_rules(sample, rules, min_support=1, max_paths_per_rule=3):
-    """
-    rule 打分思路：
-    + support: BFS 命中路径数（主信号）
-    + q_entity coverage: 命中的起始实体数
-    - len penalty: 过长规则轻惩罚（避免噪声）
-    """
     graph_data = sample.get("graph", [])
     q_entities = sample.get("q_entity", [])
     if not graph_data or not q_entities:
         return rules, {}
 
-    graph = utils.build_graph(graph_data)  # 你已改为 DiGraph 默认
-    scored = []
+    graph = utils.build_graph(graph_data)
+    kept_rules = []
     support_stats = {}
 
     for rule in rules:
         if not isinstance(rule, list) or len(rule) == 0:
             continue
-
         support = 0
-        covered_entities = 0
         for entity in q_entities:
-            paths = utils.bfs_with_rule(graph, entity, rule, max_p=max_paths_per_rule)
-            if paths:
-                covered_entities += 1
-                support += len(paths)
-
-        # 可解释打分：support 为主，覆盖实体为辅，长度轻惩罚
-        score = support * 10 + covered_entities * 2 - max(0, len(rule) - 3)
-
-        key = " -> ".join(rule)
-        support_stats[key] = {
-            "support": support,
-            "covered_entities": covered_entities,
-            "score": score,
-            "rule_len": len(rule),
-        }
-
-        # 硬过滤：至少有 min_support
+            support += len(utils.bfs_with_rule(graph, entity, rule, max_p=max_paths_per_rule))
+            if support >= min_support:
+                break
+        support_stats[" -> ".join(rule)] = support
         if support >= min_support:
-            scored.append((score, rule))
-
-    # 排序后输出：更强规则在前
-    scored.sort(key=lambda x: x[0], reverse=True)
-    kept_rules = [r for _, r in scored]
-
+            kept_rules.append(rule)
     return kept_rules, support_stats
 
 def main(args):
