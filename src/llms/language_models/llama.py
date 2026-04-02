@@ -17,6 +17,10 @@ class Llama(BaseLanguageModel):
                             default='meta-llama/Llama-2-7b-chat-hf')
         parser.add_argument('--max_new_tokens', type=int, help="max length", default=128)
         parser.add_argument('--dtype', choices=['fp32', 'fp16', 'bf16'], default='fp16')
+        parser.add_argument('--do_sample', action='store_true', help="enable sampling decode")
+        parser.add_argument('--temperature', type=float, default=0.0, help="sampling temperature")
+        parser.add_argument('--top_p', type=float, default=1.0, help="nucleus sampling p")
+        parser.add_argument('--num_beams', type=int, default=1, help="beam size for generation")
 
     def __init__(self, args):
         self.args = args
@@ -132,5 +136,13 @@ class Llama(BaseLanguageModel):
 
     @torch.inference_mode()
     def generate_sentence(self, llm_input):
-        outputs = self.generator(llm_input, return_full_text=False, max_new_tokens=self.args.max_new_tokens)
+        outputs = self.generator(
+            llm_input,
+            return_full_text=False,
+            max_new_tokens=self.args.max_new_tokens,
+            do_sample=self.args.do_sample,
+            temperature=self.args.temperature,
+            top_p=self.args.top_p,
+            num_beams=self.args.num_beams,
+        )
         return outputs[0]['generated_text']  # type: ignore
