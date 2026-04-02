@@ -23,6 +23,19 @@ RULE_MODEL_PATH=${RULE_MODEL_PATH:-${MODEL_PATH}}
 PRED_MODEL_PATH=${PRED_MODEL_PATH:-${MODEL_PATH}}
 PROMPT_PATH=${PROMPT_PATH:-prompts/llama2_predict.txt}
 N_BEAM=${N_BEAM:-3}
+VERIFY_RULES=${VERIFY_RULES:-1}
+MIN_RULE_SUPPORT=${MIN_RULE_SUPPORT:-1}
+MAX_PATHS_PER_RULE=${MAX_PATHS_PER_RULE:-5}
+
+PRED_MAX_NEW_TOKENS=${PRED_MAX_NEW_TOKENS:-96}
+PRED_DO_SAMPLE=${PRED_DO_SAMPLE:-0}
+PRED_TEMPERATURE=${PRED_TEMPERATURE:-0.0}
+PRED_TOP_P=${PRED_TOP_P:-1.0}
+PRED_NUM_BEAMS=${PRED_NUM_BEAMS:-1}
+
+PRED_PATH_TOP_K=${PRED_PATH_TOP_K:-20}
+PRED_BIDIRECTIONAL_GRAPH=${PRED_BIDIRECTIONAL_GRAPH:-0}
+PRED_SELF_CONSISTENCY_K=${PRED_SELF_CONSISTENCY_K:-1}
 
 # Separate attack-strength knobs for rand/ours.
 # Rand defaults are intentionally mild to prevent over-poisoning collapse.
@@ -239,6 +252,10 @@ rule_stage() {
   local d="$1"
   local clean_file
   clean_file="$(dataset_clean_file "$d")"
+  local extra_rule_args=()
+  if [[ "${VERIFY_RULES}" == "1" ]]; then
+    extra_rule_args+=(--verify_rules --min_rule_support "$MIN_RULE_SUPPORT" --max_paths_per_rule "$MAX_PATHS_PER_RULE")
+  fi
   python src/qa_prediction/gen_rule_path.py \
     --d "$clean_file" \
     --split test \
@@ -246,7 +263,8 @@ rule_stage() {
     --model_path "$RULE_MODEL_PATH" \
     --n_beam "$N_BEAM" \
     --output_path "$RULE_ROOT" \
-    --force
+    --force \
+    "${extra_rule_args[@]}"
 }
 
 rule_stage_ours() {
@@ -258,6 +276,10 @@ rule_stage_ours() {
   if [[ "$ours_file" == "$clean_file" ]]; then
     return 0
   fi
+  local extra_rule_args=()
+  if [[ "${VERIFY_RULES}" == "1" ]]; then
+    extra_rule_args+=(--verify_rules --min_rule_support "$MIN_RULE_SUPPORT" --max_paths_per_rule "$MAX_PATHS_PER_RULE")
+  fi
   python src/qa_prediction/gen_rule_path.py \
     --d "$ours_file" \
     --split test \
@@ -265,7 +287,8 @@ rule_stage_ours() {
     --model_path "$RULE_MODEL_PATH" \
     --n_beam "$N_BEAM" \
     --output_path "$RULE_ROOT" \
-    --force
+    --force \
+    "${extra_rule_args[@]}"
 }
 
 poison_rand_stage() {
@@ -312,6 +335,13 @@ predict_once() {
   local data_path="$1"
   local d_name="$2"
   local rf="$3"
+  local extra_pred_args=()
+  if [[ "${PRED_DO_SAMPLE}" == "1" ]]; then
+    extra_pred_args+=(--do_sample)
+  fi
+  if [[ "${PRED_BIDIRECTIONAL_GRAPH}" == "1" ]]; then
+    extra_pred_args+=(--bidirectional_graph)
+  fi
 
   python src/qa_prediction/predict_answer.py \
     --data_path "$data_path" \
@@ -319,11 +349,18 @@ predict_once() {
     --split test \
     --model_name "$MODEL_NAME" \
     --model_path "$PRED_MODEL_PATH" \
+    --max_new_tokens "$PRED_MAX_NEW_TOKENS" \
+    --temperature "$PRED_TEMPERATURE" \
+    --top_p "$PRED_TOP_P" \
+    --num_beams "$PRED_NUM_BEAMS" \
+    --path_top_k "$PRED_PATH_TOP_K" \
+    --self_consistency_k "$PRED_SELF_CONSISTENCY_K" \
     --prompt_path "$PROMPT_PATH" \
     --add_rule \
     --rule_path "$rf" \
     --predict_path "$PRED_ROOT" \
-    --force
+    --force \
+    "${extra_pred_args[@]}"
 }
 
 predict_clean_stage() {
@@ -557,6 +594,9 @@ main() {
   echo "[config] STAGES=${STAGES}"
   echo "[config] OURS base cwq=${OURS_CWQ_BASE}, webqsp=${OURS_WEBQSP_BASE}, allow_clean_fallback=${OURS_ALLOW_CLEAN_FALLBACK}"
   echo "[config] TABLE3 prefer_detailed_eval=${TABLE3_PREFER_DETAILED_EVAL}"
+  echo "[config] RULE verify=${VERIFY_RULES}, min_support=${MIN_RULE_SUPPORT}, max_paths_per_rule=${MAX_PATHS_PER_RULE}"
+  echo "[config] PRED decode max_new_tokens=${PRED_MAX_NEW_TOKENS}, do_sample=${PRED_DO_SAMPLE}, temperature=${PRED_TEMPERATURE}, top_p=${PRED_TOP_P}, num_beams=${PRED_NUM_BEAMS}"
+  echo "[config] PRED path_top_k=${PRED_PATH_TOP_K}, bidirectional_graph=${PRED_BIDIRECTIONAL_GRAPH}, self_consistency_k=${PRED_SELF_CONSISTENCY_K}"
   echo "[config] RAND topk=${RAND_INJECT_TOP_K}, repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
   echo "[config] OURS topk=${OURS_INJECT_TOP_K}, repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
 
