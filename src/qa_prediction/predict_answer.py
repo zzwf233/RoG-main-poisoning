@@ -156,13 +156,31 @@ def prediction(data, processed_list, input_builder, model):
     data['predicted_paths'] = final_paths_for_prompt
     input = input_builder.process_input(data)
 
-    prediction = model.generate_sentence(input)
-    if prediction is None:
+    raw_predictions = []
+    sc_k = max(1, int(getattr(input_builder, "self_consistency_k", 1)))
+    for _ in range(sc_k):
+        one_pred = model.generate_sentence(input)
+        if one_pred is not None:
+            raw_predictions.append(one_pred)
+    if not raw_predictions:
         return None
+
+    if len(raw_predictions) == 1:
+        prediction = raw_predictions[0]
+    else:
+        counter = defaultdict(int)
+        for p in raw_predictions:
+            counter[parse_top1_text(str(p)).strip().lower()] += 1
+        winner = max(counter.items(), key=lambda kv: kv[1])[0]
+        original = next((p for p in raw_predictions if parse_top1_text(str(p)).strip().lower() == winner), raw_predictions[0])
+        prediction = original
+
     result = {
         "id": id,
         "question": question,
         "prediction": prediction,
+        "self_consistency_k": sc_k,
+        "self_consistency_candidates": raw_predictions if len(raw_predictions) > 1 else [],
         "ground_truth": answer,
         "poison_target": poison_target,
         "adversarial_answers": adversarial_answers,
@@ -288,14 +306,22 @@ def main(args, LLM):
             each_line=args.each_line,
             maximun_token=model.maximun_token,
             tokenize=model.tokenize,
+            path_top_k=args.path_top_k,
+            bidirectional_graph=args.bidirectional_graph,
         )
+        input_builder.self_consistency_k = args.self_consistency_k
         print("Prepare pipline for inference...")
         model.prepare_for_inference()
     else:
         model = None
         input_builder = PromptBuilder(
-            args.prompt_path, args.add_rule, use_true=args.use_true
+            args.prompt_path,
+            args.add_rule,
+            use_true=args.use_true,
+            path_top_k=args.path_top_k,
+            bidirectional_graph=args.bidirectional_graph,
         )
+        input_builder.self_consistency_k = args.self_consistency_k
 
     with open(os.path.join(output_dir, "args.txt"), "w") as f:
         json.dump(args.__dict__, f, indent=2)
@@ -424,6 +450,9 @@ if __name__ == "__main__":
     argparser.add_argument("--cascade_mode", action="store_true")
     argparser.add_argument("--prev_answer_token", type=str, default="<PREV_ANSWER>")
     argparser.add_argument("--slow_log_seconds", type=float, default=30.0)
+    argparser.add_argument("--path_top_k", type=int, default=20, help="top-k ranked reasoning paths kept for prompt")
+    argparser.add_argument("--bidirectional_graph", action="store_true", help="build bidirectional graph for BFS grounding")
+    argparser.add_argument("--self_consistency_k", type=int, default=1, help="number of generations per sample for majority voting")
     
     args, _ = argparser.parse_known_args()
     if args.model_name != "no-llm":
