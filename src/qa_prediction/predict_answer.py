@@ -15,6 +15,45 @@ from multiprocessing import Pool
 from qa_prediction.build_qa_input import PromptBuilder
 from functools import partial
 import time
+import inspect
+
+
+def build_prompt_builder(args, model=None):
+    """Build PromptBuilder with backward-compatible kwargs handling.
+
+    In some environments, qa_prediction.build_qa_input may be an older version
+    that does not yet accept newly added kwargs (e.g., path_top_k,
+    bidirectional_graph). This helper only forwards parameters that exist in
+    the detected PromptBuilder.__init__ signature.
+    """
+    signature = inspect.signature(PromptBuilder.__init__)
+    supported_args = set(signature.parameters.keys())
+
+    kwargs = {
+        "use_true": args.use_true,
+        "cot": args.cot,
+        "explain": args.explain,
+        "use_random": args.use_random,
+        "each_line": args.each_line,
+        "path_top_k": args.path_top_k,
+        "bidirectional_graph": args.bidirectional_graph,
+    }
+
+    if model is not None:
+        kwargs["maximun_token"] = model.maximun_token
+        kwargs["tokenize"] = model.tokenize
+
+    filtered_kwargs = {
+        key: value for key, value in kwargs.items() if key in supported_args
+    }
+    dropped_kwargs = sorted(set(kwargs.keys()) - set(filtered_kwargs.keys()))
+    if dropped_kwargs:
+        print(
+            "Warning: PromptBuilder does not support args "
+            f"{dropped_kwargs}; ignored for compatibility."
+        )
+
+    return PromptBuilder(args.prompt_path, args.add_rule, **filtered_kwargs)
 
 def get_output_file(path, force=False):
     if not os.path.exists(path) or force:
@@ -296,31 +335,13 @@ def main(args, LLM):
         os.makedirs(output_dir)
     if LLM is not None:
         model = LLM(args)
-        input_builder = PromptBuilder(
-            args.prompt_path,
-            args.add_rule,
-            use_true=args.use_true,
-            cot=args.cot,
-            explain=args.explain,
-            use_random=args.use_random,
-            each_line=args.each_line,
-            maximun_token=model.maximun_token,
-            tokenize=model.tokenize,
-            path_top_k=args.path_top_k,
-            bidirectional_graph=args.bidirectional_graph,
-        )
+        input_builder = build_prompt_builder(args, model=model)
         input_builder.self_consistency_k = args.self_consistency_k
         print("Prepare pipline for inference...")
         model.prepare_for_inference()
     else:
         model = None
-        input_builder = PromptBuilder(
-            args.prompt_path,
-            args.add_rule,
-            use_true=args.use_true,
-            path_top_k=args.path_top_k,
-            bidirectional_graph=args.bidirectional_graph,
-        )
+        input_builder = build_prompt_builder(args, model=None)
         input_builder.self_consistency_k = args.self_consistency_k
 
     with open(os.path.join(output_dir, "args.txt"), "w") as f:
