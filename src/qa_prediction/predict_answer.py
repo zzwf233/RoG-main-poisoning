@@ -450,6 +450,12 @@ if __name__ == "__main__":
     argparser.add_argument("--cascade_mode", action="store_true")
     argparser.add_argument("--prev_answer_token", type=str, default="<PREV_ANSWER>")
     argparser.add_argument("--slow_log_seconds", type=float, default=30.0)
+    # Decode knobs are defined in the shared parser so script-level flags
+    # always work, regardless of model-specific add_args behavior.
+    argparser.add_argument("--do_sample", action="store_true", help="enable sampling decode")
+    argparser.add_argument("--temperature", type=float, default=0.0, help="sampling temperature")
+    argparser.add_argument("--top_p", type=float, default=1.0, help="nucleus sampling p")
+    argparser.add_argument("--num_beams", type=int, default=1, help="beam size for generation")
     argparser.add_argument("--path_top_k", type=int, default=20, help="top-k ranked reasoning paths kept for prompt")
     argparser.add_argument("--bidirectional_graph", action="store_true", help="build bidirectional graph for BFS grounding")
     argparser.add_argument("--self_consistency_k", type=int, default=1, help="number of generations per sample for majority voting")
