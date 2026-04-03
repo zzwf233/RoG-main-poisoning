@@ -132,13 +132,5 @@ class Llama(BaseLanguageModel):
 
     @torch.inference_mode()
     def generate_sentence(self, llm_input):
-        outputs = self.generator(
-            llm_input,
-            return_full_text=False,
-            max_new_tokens=self.args.max_new_tokens,
-            do_sample=getattr(self.args, "do_sample", False),
-            temperature=getattr(self.args, "temperature", 0.0),
-            top_p=getattr(self.args, "top_p", 1.0),
-            num_beams=getattr(self.args, "num_beams", 1),
-        )
+        outputs = self.generator(llm_input, return_full_text=False, max_new_tokens=self.args.max_new_tokens)
         return outputs[0]['generated_text']  # type: ignore
