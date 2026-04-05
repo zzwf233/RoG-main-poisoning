@@ -1,13 +1,16 @@
 import argparse
 import copy
+import hashlib
 import json
 import os
 import random
+import subprocess
 import uuid
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from openai import OpenAI
+import openai
 from tqdm import tqdm
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-VL-72B-Instruct"
@@ -19,8 +22,8 @@ def parse_args():
     parser.add_argument("--input_file", type=str, default="datasets/cwq_test.jsonl", help="原始数据集 JSONL")
     parser.add_argument("--rule_file", type=str, required=True, help="RoG rule 文件")
     parser.add_argument("--output_file", type=str, default="datasets/poisoned_cwq_dynamic.jsonl")
-    parser.add_argument("--mode", type=str, choices=["ours", "rand"], default="ours",
-                        help="Attack mode: ours=LLM planner pivot injection, rand=random baseline")
+    parser.add_argument("--mode", type=str, choices=["ours", "rand", "rand_local", "rand_global"], default="ours",
+                        help="Attack mode: ours=LLM planner pivot injection, rand/rand_local=random local baseline, rand_global=cross-sample random baseline")
 
 
     # LLM 配置：优先命令行，其次环境变量
@@ -47,8 +50,17 @@ def parse_args():
     parser.add_argument("--hop_boost_if_type_match", type=float, default=1.5, help="target 类型匹配时的注入倍数")
     parser.add_argument("--hop_boost_if_type_mismatch", type=float, default=0.7, help="target 类型不匹配时的注入倍数")
     parser.add_argument("--target_top_k", type=int, default=8, help="按语义得分保留前 k 个候选 target")
+    parser.add_argument("--budget_k", type=int, default=0, help="可选：每题最多保留的注入三元组数（0=不限制）")
+    parser.add_argument("--run_config_out", type=str, default="", help="可选：运行配置快照 JSON 输出路径")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def canonical_mode(mode: str) -> str:
+    mode = str(mode).strip().lower()
+    if mode == "rand":
+        return "rand_local"
+    return mode
 
 def _normalize_rule(raw_rule) -> Optional[Tuple[str, Optional[str]]]:
     """兼容 rules/prediction 的不同格式，统一成 (r1, r2)。"""
@@ -318,7 +330,7 @@ def build_adversarial_answer_set(
     return out
 
 def llm_plan_pivot_attack(
-    client: Optional[OpenAI],
+    client: Optional[Any],
     model_name: str,
     question: str,
     original_answer: str,
@@ -705,15 +717,119 @@ def build_random_attack_plan(
         "pivot_node": pivot,
         "reasoning": "random baseline from entity pool",
     }
+def build_global_entity_pools(items: List[dict]) -> Tuple[Dict[str, List[str]], List[str]]:
+    per_qid: Dict[str, List[str]] = {}
+    merged: List[str] = []
+    seen = set()
+    for it in items:
+        qid = str(it.get("id", "")).strip()
+        if not qid:
+            continue
+        pool = build_readable_entity_pool(it)
+        per_qid[qid] = pool
+        for ent in pool:
+            k = _normalize_text(ent)
+            if k and k not in seen:
+                seen.add(k)
+                merged.append(ent)
+    return per_qid, merged
+
+
+def pick_global_candidate_pool(
+    qid: str,
+    per_qid_pool: Dict[str, List[str]],
+    global_pool: List[str],
+    local_pool: List[str],
+) -> Tuple[List[str], bool]:
+    cross_pool = []
+    for other_qid, pool in per_qid_pool.items():
+        if other_qid == qid:
+            continue
+        cross_pool.extend(pool)
+    if cross_pool:
+        return cross_pool, False
+    if global_pool:
+        return global_pool, False
+    return local_pool, True
+
+
+def limit_poison_triples(poison_triples: List[List[str]], budget_k: int) -> List[List[str]]:
+    if budget_k <= 0 or len(poison_triples) <= budget_k:
+        return poison_triples
+    name_triples = []
+    other_triples = []
+    for tri in poison_triples:
+        if isinstance(tri, list) and len(tri) == 3 and str(tri[1]) == "type.object.name":
+            name_triples.append(tri)
+        else:
+            other_triples.append(tri)
+    out = name_triples[:budget_k]
+    if len(out) < budget_k:
+        out.extend(other_triples[: budget_k - len(out)])
+    return out
+
+
+def _file_sha256(path: str) -> str:
+    if not path or not os.path.exists(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_commit_hash() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return ""
+
+
+def write_run_config(args, usage_stats: dict, extra_stats: dict):
+    out_path = args.run_config_out or f"{args.output_file}.run_config.json"
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": _git_commit_hash(),
+        "mode": canonical_mode(args.mode),
+        "seed": args.seed,
+        "budget_k": args.budget_k,
+        "inject_top_k": args.inject_top_k,
+        "hop_repeat": args.hop_repeat,
+        "single_hop_repeat": args.single_hop_repeat,
+        "front_boost": args.front_boost,
+        "hop_boost_if_type_match": args.hop_boost_if_type_match,
+        "hop_boost_if_type_mismatch": args.hop_boost_if_type_mismatch,
+        "target_top_k": args.target_top_k,
+        "input_file": args.input_file,
+        "rule_file": args.rule_file,
+        "output_file": args.output_file,
+        "input_file_sha256": _file_sha256(args.input_file),
+        "rule_file_sha256": _file_sha256(args.rule_file),
+        "usage_stats": usage_stats,
+        "extra_stats": extra_stats,
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"🧾 Run config snapshot saved to: {out_path}")
 
 def main():
     args = parse_args()
+    args.mode = canonical_mode(args.mode)
     random.seed(args.seed)
 
     api_key = args.api_key or os.getenv("OPENAI_API_KEY") or os.getenv("SILICONFLOW_API_KEY")
-    client = OpenAI(api_key=api_key, base_url=args.api_base) if api_key else None
+    client = None
+    if api_key:
+        if hasattr(openai, "OpenAI"):
+            client = openai.OpenAI(api_key=api_key, base_url=args.api_base)
+        else:
+            print("⚠️ Installed openai package has no OpenAI client (likely legacy version); fallback to entity-pool planner.")
     if client is None:
-        print("⚠️ No API key provided; planner will use entity-pool fallback targets.")
+        print("⚠️ API client unavailable; planner will use entity-pool fallback targets.")
 
     rog_rules = load_rog_rules(args.rule_file)
 
@@ -728,7 +844,7 @@ def main():
                 raw_data.append(json.loads(line))
             except Exception:
                 continue
-
+    per_qid_entity_pool, global_entity_pool = build_global_entity_pools(raw_data)
     success_count = 0
     usage_stats = {
         "api_attempts": 0,
@@ -738,6 +854,8 @@ def main():
         "fallback_no_client": 0,
         "fallback_single_hop": 0,
         "fallback_api_error": 0,
+        "rand_global_cross_q_samples": 0,
+        "rand_global_fallback_local": 0,
     }
     print("🚀 开始执行 Pivot Injection 攻击...")
 
@@ -771,12 +889,24 @@ def main():
         candidate_entities = build_readable_entity_pool(item)
 
         primary_start_node = str(start_nodes[0])
-        if args.mode == "rand":
+        if args.mode in {"rand_local", "rand_global"}:
+            random_pool = candidate_entities
+            if args.mode == "rand_global":
+                random_pool, used_local_fallback = pick_global_candidate_pool(
+                    qid=qid,
+                    per_qid_pool=per_qid_entity_pool,
+                    global_pool=global_entity_pool,
+                    local_pool=candidate_entities,
+                )
+                if used_local_fallback:
+                    usage_stats["rand_global_fallback_local"] += 1
+                else:
+                    usage_stats["rand_global_cross_q_samples"] += 1
             attack_plan = build_random_attack_plan(
                 question=question,
                 original_answer=ground_truth,
                 r2=r2_clean,
-                candidate_entities=candidate_entities,
+                candidate_entities=random_pool,
                 target_top_k=args.target_top_k,
             )
         else:
@@ -902,6 +1032,7 @@ def main():
                     poison_triples.append([primary_start_node, r1_clean, fake_pivot_id])
                 for _ in range(single_hop_repeat_cur):
                     poison_triples.append([primary_start_node, r1_clean, cur_target])
+        poison_triples = limit_poison_triples(poison_triples, int(args.budget_k))
 
         first_target_mid = ""
         for tri in poison_triples:
@@ -929,11 +1060,13 @@ def main():
         new_item["num_candidates"] = len(candidate_plans)
         new_item["inject_top_k"] = inject_k
         new_item["front_factor"] = front_factor
-        new_item["attack_mode"] = "pivot_rand" if args.mode == "rand" else "pivot_llm"
+        new_item["attack_mode"] = "pivot_rand_global" if args.mode == "rand_global" else ("pivot_rand_local" if args.mode == "rand_local" else "pivot_llm")
         new_item["type_factor"] = type_factor
         new_item["repeat_factor"] = repeat_factor
+        new_item["added_triples_count"] = len(poison_triples)
+        new_item["budget_k"] = int(args.budget_k)
         new_item["is_poisoned"] = True
-        new_item["attack_mode"] = "pivot_llm"
+
         success_count += 1
         new_items.append(new_item)
 
@@ -971,6 +1104,15 @@ def main():
                 indent=2,
             )
         print(f"📝 API usage report saved to: {args.api_usage_report}")
+    write_run_config(
+        args=args,
+        usage_stats=usage_stats,
+        extra_stats={
+            "total_samples": len(raw_data),
+            "poisoned_samples": success_count,
+            "global_entity_pool_size": len(global_entity_pool),
+        },
+    )
 
     if args.require_api and usage_stats["api_success"] <= 0:
         raise RuntimeError(
