@@ -45,6 +45,15 @@ def eval_hits1(prediction_list, answer):
             return 1
     return 0
 
+def eval_em(prediction_list, answer):
+    if not prediction_list:
+        return 0
+    top1 = normalize(str(prediction_list[0]))
+    for a in answer:
+        if top1 == normalize(str(a)):
+            return 1
+    return 0
+
 def eval_f1(prediction, answer):
     if len(prediction) == 0:
         return 0, 0, 0
@@ -80,6 +89,7 @@ def eval_result(predict_file, cal_f1=True, topk = -1):
     acc_list = []
     hit_list = []
     hits1_list = []
+    em_list = []
     f1_list = []
     precission_list = []
     recall_list = []
@@ -106,23 +116,38 @@ def eval_result(predict_file, cal_f1=True, topk = -1):
                 acc = eval_acc(prediction_str, answer)
                 hit = eval_hit(prediction_str, answer)
                 hits1 = eval_hits1(prediction, answer)
+                em = eval_em(prediction, answer)
                 acc_list.append(acc)
                 hit_list.append(hit)
                 hits1_list.append(hits1)
-                f2.write(json.dumps({'id': id, 'prediction': prediction, 'ground_truth': answer, 'acc': acc, 'hit': hit, 'hits1': hits1, 'f1': f1_score, 'precission': precision_score, 'recall': recall_score}) + '\n')
+                em_list.append(em)
+                f2.write(json.dumps({'id': id, 'prediction': prediction, 'ground_truth': answer, 'acc': acc, 'hit': hit, 'hits1': hits1, 'em': em, 'f1': f1_score, 'precission': precision_score, 'recall': recall_score}) + '\n')
             else:
                 acc = eval_acc(prediction, answer)
                 hit = eval_hit(prediction, answer)
                 hits1 = hit
+                em = 1 if normalize(str(prediction)) in [normalize(str(a)) for a in answer] else 0
                 acc_list.append(acc)
                 hit_list.append(hit)
                 hits1_list.append(hits1)
-                f2.write(json.dumps({'id': id, 'prediction': prediction, 'ground_truth': answer, 'acc': acc, 'hit': hit, 'hits1': hits1}) + '\n')
+                em_list.append(em)
+                f2.write(json.dumps({'id': id, 'prediction': prediction, 'ground_truth': answer, 'acc': acc, 'hit': hit, 'hits1': hits1, 'em': em}) + '\n')
     
     if len(f1_list) > 0:
-        result_str = "Accuracy: " + str(sum(acc_list) * 100 / len(acc_list)) + " Hits@1: " + str(sum(hits1_list) * 100 / len(hits1_list)) + " F1: " + str(sum(f1_list) * 100 / len(f1_list)) + " Precision: " + str(sum(precission_list) * 100 / len(precission_list)) + " Recall: " + str(sum(recall_list) * 100 / len(recall_list))
+        result_str = (
+            "Hit: " + str(sum(hit_list) * 100 / len(hit_list)) +
+            " F1: " + str(sum(f1_list) * 100 / len(f1_list)) +
+            " Precision: " + str(sum(precission_list) * 100 / len(precission_list)) +
+            " Recall: " + str(sum(recall_list) * 100 / len(recall_list)) +
+            " Hits@1: " + str(sum(hits1_list) * 100 / len(hits1_list)) +
+            " EM: " + str(sum(em_list) * 100 / len(em_list))
+        )
     else:
-        result_str = "Accuracy: " + str(sum(acc_list) * 100 / len(acc_list)) + " Hits@1: " + str(sum(hits1_list) * 100 / len(hits1_list))
+        result_str = (
+            "Hit: " + str(sum(hit_list) * 100 / len(hit_list)) +
+            " Hits@1: " + str(sum(hits1_list) * 100 / len(hits1_list)) +
+            " EM: " + str(sum(em_list) * 100 / len(em_list))
+        )
     print(result_str)
     result_name = "eval_result_top_{topk}.txt" if topk > 0 else 'eval_result.txt'
     eval_result_path = predict_file.replace('predictions.jsonl', result_name)
