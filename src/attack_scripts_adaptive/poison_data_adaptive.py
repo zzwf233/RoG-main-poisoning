@@ -20,12 +20,10 @@ DEFAULT_API_BASE = "https://api.siliconflow.cn/v1"
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, default="datasets/cwq_test.jsonl", help="原始数据集 JSONL")
-    parser.add_argument("--rule_file", type=str, required=True, help="RoG rule 文件")
+    parser.add_argument("--rule_file", type=str, default="", help="RoG rule 文件（ours/rand_local 模式需要）")
     parser.add_argument("--output_file", type=str, default="datasets/poisoned_cwq_dynamic.jsonl")
-    parser.add_argument("--mode", type=str, choices=["ours", "rand", "rand_local", "rand_global"], default="ours",
-                        help="Attack mode: ours=LLM planner pivot injection, rand/rand_local=random local baseline, rand_global=cross-sample random baseline")
-
-
+    parser.add_argument("--mode", type=str, choices=["ours", "rand", "rand_local", "paper_rand"], default="ours",
+                        help="Attack mode: ours=LLM planner pivot injection, rand/paper_rand=paper-style random replacement (no rules), rand_local=random local baseline with rules")
     # LLM 配置：优先命令行，其次环境变量
     parser.add_argument("--api_key", type=str, default="", help="OpenAI-compatible API key")
     parser.add_argument("--api_base", type=str, default=DEFAULT_API_BASE)
@@ -59,8 +57,9 @@ def parse_args():
 def canonical_mode(mode: str) -> str:
     mode = str(mode).strip().lower()
     if mode == "rand":
-        return "rand_local"
+        return "paper_rand"
     return mode
+
 
 def _normalize_rule(raw_rule) -> Optional[Tuple[str, Optional[str]]]:
     """兼容 rules/prediction 的不同格式，统一成 (r1, r2)。"""
@@ -717,40 +716,59 @@ def build_random_attack_plan(
         "pivot_node": pivot,
         "reasoning": "random baseline from entity pool",
     }
-def build_global_entity_pools(items: List[dict]) -> Tuple[Dict[str, List[str]], List[str]]:
-    per_qid: Dict[str, List[str]] = {}
-    merged: List[str] = []
-    seen = set()
-    for it in items:
-        qid = str(it.get("id", "")).strip()
-        if not qid:
-            continue
-        pool = build_readable_entity_pool(it)
-        per_qid[qid] = pool
-        for ent in pool:
-            k = _normalize_text(ent)
-            if k and k not in seen:
-                seen.add(k)
-                merged.append(ent)
-    return per_qid, merged
 
+def apply_paper_rand_replacement(
+    item: dict,
+    start_nodes: List[str],
+    candidate_entities: List[str],
+    max_replacements: int,
+) -> Tuple[dict, int]:
+    """
+    Paper-style random baseline:
+    keep triples connected to question entity, randomly replace the other endpoint.
+    """
+    graph = item.get("graph", [])
+    if not isinstance(graph, list) or not graph:
+        return item, 0
 
-def pick_global_candidate_pool(
-    qid: str,
-    per_qid_pool: Dict[str, List[str]],
-    global_pool: List[str],
-    local_pool: List[str],
-) -> Tuple[List[str], bool]:
-    cross_pool = []
-    for other_qid, pool in per_qid_pool.items():
-        if other_qid == qid:
+    start_set = {str(x).strip() for x in start_nodes if str(x).strip()}
+    if not start_set:
+        return item, 0
+
+    pool = [str(x).strip() for x in candidate_entities if str(x).strip()]
+    if not pool:
+        return item, 0
+
+    candidate_slots = []
+    for idx, tri in enumerate(graph):
+        if not isinstance(tri, list) or len(tri) < 3:
             continue
-        cross_pool.extend(pool)
-    if cross_pool:
-        return cross_pool, False
-    if global_pool:
-        return global_pool, False
-    return local_pool, True
+        h, r, t = str(tri[0]).strip(), str(tri[1]).strip(), str(tri[2]).strip()
+        if r == "type.object.name":
+            continue
+        if h in start_set and t not in start_set:
+            candidate_slots.append((idx, 2, t))
+        if t in start_set and h not in start_set:
+            candidate_slots.append((idx, 0, h))
+
+    if not candidate_slots:
+        return item, 0
+
+    random.shuffle(candidate_slots)
+    quota = min(max(1, int(max_replacements)), len(candidate_slots))
+    chosen = candidate_slots[:quota]
+
+    new_item = copy.deepcopy(item)
+    replaced = 0
+    for idx, slot, old_val in chosen:
+        tri = new_item["graph"][idx]
+        alternatives = [x for x in pool if _normalize_text(x) != _normalize_text(old_val)]
+        if not alternatives:
+            continue
+        tri[slot] = random.choice(alternatives)
+        replaced += 1
+
+    return new_item, replaced
 
 
 def limit_poison_triples(poison_triples: List[List[str]], budget_k: int) -> List[List[str]]:
@@ -831,7 +849,13 @@ def main():
     if client is None:
         print("⚠️ API client unavailable; planner will use entity-pool fallback targets.")
 
-    rog_rules = load_rog_rules(args.rule_file)
+    mode_needs_rules = args.mode in {"ours", "rand_local"}
+    if mode_needs_rules:
+        if not args.rule_file:
+            raise ValueError(f"--rule_file is required when mode={args.mode}")
+        rog_rules = load_rog_rules(args.rule_file)
+    else:
+        rog_rules = {}
 
     out_dir = os.path.dirname(args.output_file)
     if out_dir and not os.path.exists(out_dir):
@@ -844,7 +868,6 @@ def main():
                 raw_data.append(json.loads(line))
             except Exception:
                 continue
-    per_qid_entity_pool, global_entity_pool = build_global_entity_pools(raw_data)
     success_count = 0
     usage_stats = {
         "api_attempts": 0,
@@ -854,8 +877,6 @@ def main():
         "fallback_no_client": 0,
         "fallback_single_hop": 0,
         "fallback_api_error": 0,
-        "rand_global_cross_q_samples": 0,
-        "rand_global_fallback_local": 0,
     }
     print("🚀 开始执行 Pivot Injection 攻击...")
 
@@ -867,6 +888,25 @@ def main():
         if isinstance(ground_truth, list) and ground_truth:
             ground_truth = ground_truth[0]
         ground_truth = str(ground_truth)
+
+        if args.mode == "paper_rand":
+            start_nodes = find_potential_start_nodes(item)
+            candidate_entities = build_readable_entity_pool(item)
+            replace_quota = max(1, int(args.inject_top_k))
+            if int(args.budget_k) > 0:
+                replace_quota = min(replace_quota, int(args.budget_k))
+            new_item, replaced_cnt = apply_paper_rand_replacement(
+                item=item,
+                start_nodes=start_nodes,
+                candidate_entities=candidate_entities,
+                max_replacements=replace_quota,
+            )
+            if replaced_cnt > 0:
+                success_count += 1
+            new_item["attack_mode"] = "paper_rand_replace"
+            new_item["paper_rand_replaced"] = int(replaced_cnt)
+            new_items.append(new_item)
+            continue
 
         rule_info = _resolve_rule_for_id(rog_rules, qid)
         if not rule_info:
@@ -889,24 +929,12 @@ def main():
         candidate_entities = build_readable_entity_pool(item)
 
         primary_start_node = str(start_nodes[0])
-        if args.mode in {"rand_local", "rand_global"}:
-            random_pool = candidate_entities
-            if args.mode == "rand_global":
-                random_pool, used_local_fallback = pick_global_candidate_pool(
-                    qid=qid,
-                    per_qid_pool=per_qid_entity_pool,
-                    global_pool=global_entity_pool,
-                    local_pool=candidate_entities,
-                )
-                if used_local_fallback:
-                    usage_stats["rand_global_fallback_local"] += 1
-                else:
-                    usage_stats["rand_global_cross_q_samples"] += 1
+        if args.mode == "rand_local":
             attack_plan = build_random_attack_plan(
                 question=question,
                 original_answer=ground_truth,
                 r2=r2_clean,
-                candidate_entities=random_pool,
+                candidate_entities=candidate_entities,
                 target_top_k=args.target_top_k,
             )
         else:
@@ -1041,7 +1069,13 @@ def main():
                 break
         
         new_item = copy.deepcopy(item)
-        new_item["graph"] = poison_triples + original_graph
+        # Keep Ours behavior unchanged (prepend poison triples), while
+        # Rand baselines append poison triples to the tail of graph.
+        if args.mode in {"rand_local", "rand_global"}:
+            new_item["graph"] = original_graph + poison_triples
+        else:
+            new_item["graph"] = poison_triples + original_graph
+
 
         # 与当前预测/评估流水线字段兼容
         new_item["dynamic_target_answer"] = target_answer
@@ -1060,7 +1094,7 @@ def main():
         new_item["num_candidates"] = len(candidate_plans)
         new_item["inject_top_k"] = inject_k
         new_item["front_factor"] = front_factor
-        new_item["attack_mode"] = "pivot_rand_global" if args.mode == "rand_global" else ("pivot_rand_local" if args.mode == "rand_local" else "pivot_llm")
+        new_item["attack_mode"] = "pivot_rand_local" if args.mode == "rand_local" else "pivot_llm"
         new_item["type_factor"] = type_factor
         new_item["repeat_factor"] = repeat_factor
         new_item["added_triples_count"] = len(poison_triples)
