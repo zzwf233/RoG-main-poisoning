@@ -28,10 +28,9 @@ RoG-model/
 
 # 忽略实验结果
 results/
-config/
-resources/
-# 注意：如果你想保留 config 和 resources 里的代码，就不要加这两行
-# 但通常 results 必须忽略
+result/
+output/
+outputs/
 
 # 忽略 Python 缓存
 __pycache__/
@@ -39,3 +38,15 @@ __pycache__/
 .env
 .env.example
 venv/
+data/
+dataset/
+model/
+models/
+Llama-*/
+*.pth
+*.ckpt
+*.arrow
+*.parquet
+*.jsonl
+*.log
+*.pdf

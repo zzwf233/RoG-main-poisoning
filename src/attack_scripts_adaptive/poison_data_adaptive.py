@@ -20,11 +20,11 @@ DEFAULT_API_BASE = "https://api.siliconflow.cn/v1"
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, default="datasets/cwq_test.jsonl", help="原始数据集 JSONL")
-    parser.add_argument("--rule_file", type=str, default="", help="RoG rule 文件（ours/rand_local 模式需要）")
+    parser.add_argument("--rule_file", type=str, default="", help="RoG rule 文件（必需）")
     parser.add_argument("--output_file", type=str, default="datasets/poisoned_cwq_dynamic.jsonl")
-    parser.add_argument("--mode", type=str, choices=["ours", "rand", "rand_local", "paper_rand"], default="ours",
-                        help="Attack mode: ours=LLM planner pivot injection, rand/paper_rand=paper-style random replacement (no rules), rand_local=random local baseline with rules")
-    # LLM 配置：优先命令行，其次环境变量
+    parser.add_argument("--mode", type=str, choices=["ours"], default="ours",
+                        help="Attack mode: ours=LLM planner pivot injection")
+    
     parser.add_argument("--api_key", type=str, default="", help="OpenAI-compatible API key")
     parser.add_argument("--api_base", type=str, default=DEFAULT_API_BASE)
     parser.add_argument("--model_name", type=str, default=DEFAULT_MODEL_NAME)
@@ -40,6 +40,9 @@ def parse_args():
     parser.add_argument("--require_api", action="store_true", help="强制要求至少一次 API 成功调用，否则报错退出")
     parser.add_argument("--api_usage_report", type=str, default="", help="可选：API 使用统计输出 JSON 路径")
     parser.add_argument("--api_fail_fast_threshold", type=int, default=20, help="连续 API 失败达到阈值时提前终止（仅 require_api 生效）")
+    parser.add_argument("--max_fallback_api_error", type=int, default=0, help="累计因 API 错误走 fallback 的样本数上限（0=不限制）")
+    parser.add_argument("--resume", action="store_true", help="若存在进度文件，则从上次中断处继续")
+    parser.add_argument("--save_every", type=int, default=1, help="每处理多少条样本刷新一次进度文件（默认每条都写）")
     
     # 注入强度参数
     parser.add_argument("--hop_repeat", type=int, default=100, help="双跳时每跳重复注入次数")
@@ -52,14 +55,6 @@ def parse_args():
     parser.add_argument("--run_config_out", type=str, default="", help="可选：运行配置快照 JSON 输出路径")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
-
-
-def canonical_mode(mode: str) -> str:
-    mode = str(mode).strip().lower()
-    if mode == "rand":
-        return "paper_rand"
-    return mode
-
 
 def _normalize_rule(raw_rule) -> Optional[Tuple[str, Optional[str]]]:
     """兼容 rules/prediction 的不同格式，统一成 (r1, r2)。"""
@@ -347,6 +342,13 @@ def llm_plan_pivot_attack(
     """Pivot Injection planner：用 LLM 选 pivot + target。"""
     n_cands = max(1, int(num_candidates))
 
+    def _maybe_log_api_error(prefix: str, err: Exception):
+        if usage_stats is None:
+            return
+        log_idx = int(usage_stats.get("api_error_logs", 0))
+        if log_idx > 0 and log_idx % 100 == 0:
+            print(f"⚠️ {prefix} [error_count={log_idx}]: {err}")
+
     def _unique_candidates(cands: List[dict]) -> List[dict]:
         out = []
         seen = set()
@@ -475,9 +477,7 @@ Output JSON only:
                 if usage_stats is not None:
                     usage_stats["api_failed"] = int(usage_stats.get("api_failed", 0)) + 1
                     usage_stats["api_error_logs"] = int(usage_stats.get("api_error_logs", 0)) + 1
-                    log_idx = usage_stats["api_error_logs"]
-                    if log_idx <= 3 or log_idx % 100 == 0:
-                        print(f"⚠️ API failed (retrying), using entity-pool fallback if exhausted: {e}")
+                    _maybe_log_api_error("API failed (retrying), using entity-pool fallback if exhausted", e)
         if completion is None:
             raise last_err if last_err else RuntimeError("API call failed with unknown error")
 
@@ -530,9 +530,7 @@ Output JSON only:
 
     except Exception as e:
         if usage_stats is not None:
-            log_idx = int(usage_stats.get("api_error_logs", 0))
-            if log_idx <= 3 or log_idx % 100 == 0:
-                print(f"⚠️ API failed, using entity-pool fallback: {e}")
+            _maybe_log_api_error("API failed, using entity-pool fallback", e)
         else:
             print(f"⚠️ API failed, using entity-pool fallback: {e}")
         cands = _fallback_candidates(single_hop=(not r2), reason="API failed; fallback to entity pool")
@@ -698,78 +696,6 @@ def sync_injected_target_name_in_graph(item: dict, inherited_target: str) -> dic
 
     return item
 
-def build_random_attack_plan(
-    question: str,
-    original_answer: str,
-    r2: Optional[str],
-    candidate_entities: List[str],
-    target_top_k: int = 8,
-):
-    """Random baseline: sample target/pivot from ranked entity pool without LLM planning."""
-    ranked_cands = rank_target_candidates(candidate_entities, question, original_answer)
-    pool = ranked_cands[: max(1, target_top_k)] if ranked_cands else candidate_entities
-
-    target = pick_non_gold(pool, original_answer, default_val="FallbackEntity")
-    pivot = pick_non_gold(pool, original_answer, default_val=target) if r2 else target
-    return {
-        "target_answer": target,
-        "pivot_node": pivot,
-        "reasoning": "random baseline from entity pool",
-    }
-
-def apply_paper_rand_replacement(
-    item: dict,
-    start_nodes: List[str],
-    candidate_entities: List[str],
-    max_replacements: int,
-) -> Tuple[dict, int]:
-    """
-    Paper-style random baseline:
-    keep triples connected to question entity, randomly replace the other endpoint.
-    """
-    graph = item.get("graph", [])
-    if not isinstance(graph, list) or not graph:
-        return item, 0
-
-    start_set = {str(x).strip() for x in start_nodes if str(x).strip()}
-    if not start_set:
-        return item, 0
-
-    pool = [str(x).strip() for x in candidate_entities if str(x).strip()]
-    if not pool:
-        return item, 0
-
-    candidate_slots = []
-    for idx, tri in enumerate(graph):
-        if not isinstance(tri, list) or len(tri) < 3:
-            continue
-        h, r, t = str(tri[0]).strip(), str(tri[1]).strip(), str(tri[2]).strip()
-        if r == "type.object.name":
-            continue
-        if h in start_set and t not in start_set:
-            candidate_slots.append((idx, 2, t))
-        if t in start_set and h not in start_set:
-            candidate_slots.append((idx, 0, h))
-
-    if not candidate_slots:
-        return item, 0
-
-    random.shuffle(candidate_slots)
-    quota = min(max(1, int(max_replacements)), len(candidate_slots))
-    chosen = candidate_slots[:quota]
-
-    new_item = copy.deepcopy(item)
-    replaced = 0
-    for idx, slot, old_val in chosen:
-        tri = new_item["graph"][idx]
-        alternatives = [x for x in pool if _normalize_text(x) != _normalize_text(old_val)]
-        if not alternatives:
-            continue
-        tri[slot] = random.choice(alternatives)
-        replaced += 1
-
-    return new_item, replaced
-
 
 def limit_poison_triples(poison_triples: List[List[str]], budget_k: int) -> List[List[str]]:
     if budget_k <= 0 or len(poison_triples) <= budget_k:
@@ -812,7 +738,7 @@ def write_run_config(args, usage_stats: dict, extra_stats: dict):
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit_hash(),
-        "mode": canonical_mode(args.mode),
+        "mode": str(args.mode),
         "seed": args.seed,
         "budget_k": args.budget_k,
         "inject_top_k": args.inject_top_k,
@@ -834,9 +760,70 @@ def write_run_config(args, usage_stats: dict, extra_stats: dict):
         json.dump(payload, f, ensure_ascii=False, indent=2)
     print(f"🧾 Run config snapshot saved to: {out_path}")
 
+
+def _progress_paths(output_file: str) -> Tuple[str, str]:
+    return f"{output_file}.progress.jsonl", f"{output_file}.progress.meta.json"
+
+
+def load_progress(progress_file: str) -> Tuple[List[dict], set]:
+    items: List[dict] = []
+    processed_ids = set()
+    if not progress_file or not os.path.exists(progress_file):
+        return items, processed_ids
+
+    with open(progress_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+            items.append(item)
+            processed_ids.add(str(item.get("id", "")).strip())
+    return items, processed_ids
+
+
+def load_progress_meta(meta_file: str) -> dict:
+    if not meta_file or not os.path.exists(meta_file):
+        return {}
+    try:
+        with open(meta_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_progress_meta(meta_file: str, usage_stats: dict, success_count: int, processed_count: int):
+    payload = {
+        "usage_stats": usage_stats,
+        "success_count": success_count,
+        "processed_count": processed_count,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    with open(meta_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def append_progress_item(progress_file: str, item: dict):
+    with open(progress_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def maybe_flush_progress(meta_file: str, usage_stats: dict, success_count: int, processed_count: int, save_every: int):
+    if processed_count % max(1, int(save_every)) != 0:
+        return
+    write_progress_meta(
+        meta_file,
+        usage_stats=usage_stats,
+        success_count=success_count,
+        processed_count=processed_count,
+    )
+
 def main():
     args = parse_args()
-    args.mode = canonical_mode(args.mode)
     random.seed(args.seed)
 
     api_key = args.api_key or os.getenv("OPENAI_API_KEY") or os.getenv("SILICONFLOW_API_KEY")
@@ -849,13 +836,9 @@ def main():
     if client is None:
         print("⚠️ API client unavailable; planner will use entity-pool fallback targets.")
 
-    mode_needs_rules = args.mode in {"ours", "rand_local"}
-    if mode_needs_rules:
-        if not args.rule_file:
-            raise ValueError(f"--rule_file is required when mode={args.mode}")
-        rog_rules = load_rog_rules(args.rule_file)
-    else:
-        rog_rules = {}
+    if not args.rule_file:
+        raise ValueError("--rule_file is required when mode=ours")
+    rog_rules = load_rog_rules(args.rule_file)
 
     out_dir = os.path.dirname(args.output_file)
     if out_dir and not os.path.exists(out_dir):
@@ -868,49 +851,71 @@ def main():
                 raw_data.append(json.loads(line))
             except Exception:
                 continue
-    success_count = 0
+    progress_file, progress_meta_file = _progress_paths(args.output_file)
+    usage_stats = {}
+    processed_ids = set()
+    resumed_count = 0
+    if args.resume:
+        new_items, processed_ids = load_progress(progress_file)
+        resumed_count = len(new_items)
+        progress_meta = load_progress_meta(progress_meta_file)
+        success_count = int(progress_meta.get("success_count", 0))
+        usage_stats = progress_meta.get("usage_stats", {})
+        if not isinstance(usage_stats, dict):
+            usage_stats = {}
+        if resumed_count:
+            print(f"♻️ Resuming from progress: {resumed_count} samples already processed.")
+    else:
+        new_items = []
+        success_count = 0
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+        if os.path.exists(progress_meta_file):
+            os.remove(progress_meta_file)
     usage_stats = {
-        "api_attempts": 0,
-        "api_success": 0,
-        "api_failed": 0,
-        "api_error_logs": 0,
-        "fallback_no_client": 0,
-        "fallback_single_hop": 0,
-        "fallback_api_error": 0,
+        "api_attempts": int(usage_stats.get("api_attempts", 0)),
+        "api_success": int(usage_stats.get("api_success", 0)),
+        "api_failed": int(usage_stats.get("api_failed", 0)),
+        "api_error_logs": int(usage_stats.get("api_error_logs", 0)),
+        "fallback_no_client": int(usage_stats.get("fallback_no_client", 0)),
+        "fallback_single_hop": int(usage_stats.get("fallback_single_hop", 0)),
+        "fallback_api_error": int(usage_stats.get("fallback_api_error", 0)),
     }
     print("🚀 开始执行 Pivot Injection 攻击...")
 
-    new_items = []
+    def maybe_abort_on_fallback_threshold():
+        threshold = max(0, int(args.max_fallback_api_error))
+        if threshold <= 0:
+            return
+        fallback_count = int(usage_stats.get("fallback_api_error", 0))
+        if fallback_count < threshold:
+            return
+        attempts = max(1, int(usage_stats.get("api_attempts", 0)))
+        success = int(usage_stats.get("api_success", 0))
+        success_rate = 100.0 * success / attempts
+        raise RuntimeError(
+            "Fallback API error threshold reached: "
+            f"{fallback_count} >= {threshold}. "
+            f"Current API success={success}/{attempts} ({success_rate:.2f}%). "
+            "Stopping to avoid mixing too many fallback-planned samples into the experiment."
+        )
+
     for item in tqdm(raw_data):
         qid = str(item.get("id", "")).strip()
+        if qid in processed_ids:
+            continue
         question = item.get("question", "")
         ground_truth = item.get("answer", "")
         if isinstance(ground_truth, list) and ground_truth:
             ground_truth = ground_truth[0]
         ground_truth = str(ground_truth)
 
-        if args.mode == "paper_rand":
-            start_nodes = find_potential_start_nodes(item)
-            candidate_entities = build_readable_entity_pool(item)
-            replace_quota = max(1, int(args.inject_top_k))
-            if int(args.budget_k) > 0:
-                replace_quota = min(replace_quota, int(args.budget_k))
-            new_item, replaced_cnt = apply_paper_rand_replacement(
-                item=item,
-                start_nodes=start_nodes,
-                candidate_entities=candidate_entities,
-                max_replacements=replace_quota,
-            )
-            if replaced_cnt > 0:
-                success_count += 1
-            new_item["attack_mode"] = "paper_rand_replace"
-            new_item["paper_rand_replaced"] = int(replaced_cnt)
-            new_items.append(new_item)
-            continue
-
         rule_info = _resolve_rule_for_id(rog_rules, qid)
         if not rule_info:
             new_items.append(item)
+            append_progress_item(progress_file, item)
+            processed_ids.add(qid)
+            maybe_flush_progress(progress_meta_file, usage_stats, success_count, len(processed_ids), args.save_every)
             continue
 
         r1_clean, r2_clean = rule_info
@@ -923,58 +928,70 @@ def main():
                 start_nodes = ["__NO_START__"]
             else:
                 new_items.append(item)
+                append_progress_item(progress_file, item)
+                processed_ids.add(qid)
+                maybe_flush_progress(progress_meta_file, usage_stats, success_count, len(processed_ids), args.save_every)
                 continue
 
         # ===== 关键改动：构建当前样本实体池并传给 planner =====
         candidate_entities = build_readable_entity_pool(item)
 
         primary_start_node = str(start_nodes[0])
-        if args.mode == "rand_local":
-            attack_plan = build_random_attack_plan(
-                question=question,
-                original_answer=ground_truth,
-                r2=r2_clean,
-                candidate_entities=candidate_entities,
-                target_top_k=args.target_top_k,
-            )
-        else:
-            if (not r2_clean) and client is None:
-                usage_stats["fallback_single_hop"] += 1
-            elif client is None:
-                usage_stats["fallback_no_client"] += 1
-            attack_plan = llm_plan_pivot_attack(
-                client=client,
-                model_name=args.model_name,
-                question=question,
-                original_answer=ground_truth,
-                r1=r1_clean,
-                r2=r2_clean,
-                candidate_entities=candidate_entities,
-                temperature=args.temperature,
-                target_top_k=args.target_top_k,
-                num_candidates=args.num_candidates,
-                api_timeout=args.api_timeout,
-                api_max_retries=args.api_max_retries,
-                api_max_tokens=args.api_max_tokens,
-                usage_stats=usage_stats,
-            )
-            if isinstance(attack_plan, dict) and "API failed" in str(attack_plan.get("reasoning", "")):
-                usage_stats["fallback_api_error"] += 1
-            if (
-                args.require_api
-                and usage_stats["api_success"] == 0
-                and usage_stats["api_failed"] >= max(1, args.api_fail_fast_threshold)
-            ):
-                raise RuntimeError(
-                    f"API failed {usage_stats['api_failed']} times before any success. "
-                    f"Fail-fast triggered (threshold={args.api_fail_fast_threshold}). "
-                    f"Please check --api_base={args.api_base}, model={args.model_name}, "
-                    "network egress, and API key validity."
+        if (not r2_clean) and client is None:
+            usage_stats["fallback_single_hop"] += 1
+        elif client is None:
+            usage_stats["fallback_no_client"] += 1
+        attack_plan = llm_plan_pivot_attack(
+            client=client,
+            model_name=args.model_name,
+            question=question,
+            original_answer=ground_truth,
+            r1=r1_clean,
+            r2=r2_clean,
+            candidate_entities=candidate_entities,
+            temperature=args.temperature,
+            target_top_k=args.target_top_k,
+            num_candidates=args.num_candidates,
+            api_timeout=args.api_timeout,
+            api_max_retries=args.api_max_retries,
+            api_max_tokens=args.api_max_tokens,
+            usage_stats=usage_stats,
+        )
+        if isinstance(attack_plan, dict) and "API failed" in str(attack_plan.get("reasoning", "")):
+            usage_stats["fallback_api_error"] += 1
+            fallback_count = int(usage_stats["fallback_api_error"])
+            attempts = max(1, int(usage_stats.get("api_attempts", 0)))
+            success = int(usage_stats.get("api_success", 0))
+            success_rate = 100.0 * success / attempts
+            if fallback_count <= 3 or fallback_count % 25 == 0:
+                print(
+                    "[fallback] api_error_fallback={fallback_count}, api_success={success}/{attempts} "
+                    "({success_rate:.2f}%)".format(
+                        fallback_count=fallback_count,
+                        success=success,
+                        attempts=attempts,
+                        success_rate=success_rate,
+                    )
                 )
+            maybe_abort_on_fallback_threshold()
+        if (
+            args.require_api
+            and usage_stats["api_success"] == 0
+            and usage_stats["api_failed"] >= max(1, args.api_fail_fast_threshold)
+        ):
+            raise RuntimeError(
+                f"API failed {usage_stats['api_failed']} times before any success. "
+                f"Fail-fast triggered (threshold={args.api_fail_fast_threshold}). "
+                f"Please check --api_base={args.api_base}, model={args.model_name}, "
+                "network egress, and API key validity."
+            )
 
 
         if not attack_plan or not attack_plan.get("pivot_node"):
             new_items.append(item)
+            append_progress_item(progress_file, item)
+            processed_ids.add(qid)
+            maybe_flush_progress(progress_meta_file, usage_stats, success_count, len(processed_ids), args.save_every)
             continue
 
         raw_candidates = attack_plan.get("candidates", [])
@@ -995,6 +1012,9 @@ def main():
 
         if not candidate_plans:
             new_items.append(item)
+            append_progress_item(progress_file, item)
+            processed_ids.add(qid)
+            maybe_flush_progress(progress_meta_file, usage_stats, success_count, len(processed_ids), args.save_every)
             continue
         inject_k = max(1, min(int(args.inject_top_k), len(candidate_plans)))
         inject_plans = candidate_plans[:inject_k]
@@ -1069,13 +1089,7 @@ def main():
                 break
         
         new_item = copy.deepcopy(item)
-        # Keep Ours behavior unchanged (prepend poison triples), while
-        # Rand baselines append poison triples to the tail of graph.
-        if args.mode in {"rand_local", "rand_global"}:
-            new_item["graph"] = original_graph + poison_triples
-        else:
-            new_item["graph"] = poison_triples + original_graph
-
+        new_item["graph"] = poison_triples + original_graph
 
         # 与当前预测/评估流水线字段兼容
         new_item["dynamic_target_answer"] = target_answer
@@ -1094,7 +1108,7 @@ def main():
         new_item["num_candidates"] = len(candidate_plans)
         new_item["inject_top_k"] = inject_k
         new_item["front_factor"] = front_factor
-        new_item["attack_mode"] = "pivot_rand_local" if args.mode == "rand_local" else "pivot_llm"
+        new_item["attack_mode"] = "pivot_llm"
         new_item["type_factor"] = type_factor
         new_item["repeat_factor"] = repeat_factor
         new_item["added_triples_count"] = len(poison_triples)
@@ -1103,6 +1117,9 @@ def main():
 
         success_count += 1
         new_items.append(new_item)
+        append_progress_item(progress_file, new_item)
+        processed_ids.add(qid)
+        maybe_flush_progress(progress_meta_file, usage_stats, success_count, len(processed_ids), args.save_every)
 
 
     # ===== 二次 pass：依赖 bridge 继承 =====
@@ -1117,6 +1134,12 @@ def main():
         "📊 API usage: attempts={api_attempts}, success={api_success}, failed={api_failed}, "
         "fallback_no_client={fallback_no_client}, fallback_single_hop={fallback_single_hop}, "
         "fallback_api_error={fallback_api_error}".format(**usage_stats)
+    )
+    write_progress_meta(
+        progress_meta_file,
+        usage_stats=usage_stats,
+        success_count=success_count,
+        processed_count=len(processed_ids),
     )
 
     if args.api_usage_report:
@@ -1144,7 +1167,6 @@ def main():
         extra_stats={
             "total_samples": len(raw_data),
             "poisoned_samples": success_count,
-            "global_entity_pool_size": len(global_entity_pool),
         },
     )
 

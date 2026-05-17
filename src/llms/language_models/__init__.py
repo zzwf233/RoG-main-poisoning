@@ -4,8 +4,11 @@ from .longchat.longchat import Longchat
 from .base_language_model import BaseLanguageModel
 from .llama import Llama
 from .flan_t5 import FlanT5
+from .openai_compatible import OpenAICompatibleChat
 
 registed_language_models = {
+    'deepseek': OpenAICompatibleChat,
+    'openai-compatible': OpenAICompatibleChat,
     'gpt-4': ChatGPT,
     'gpt-3.5-turbo': ChatGPT,
     'alpaca': Alpaca,

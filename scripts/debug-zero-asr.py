@@ -33,11 +33,50 @@ def parse_rule(raw):
 def rule_to_postfix(rule_file: str) -> str:
     return rule_file.replace('/', '_').replace('.', '_')
 
+def rule_to_postfix_variants(rule_file: str) -> List[str]:
+    """Build multiple postfix candidates to tolerate path-style mismatch.
+
+    Common mismatch sources:
+    - rule_file passed as "results/..." vs "./results/..."
+    - absolute path vs relative path
+    """
+    if not rule_file:
+        return []
+
+    raw = str(rule_file)
+    variants = [raw]
+
+    # normalize leading ./
+    if raw.startswith('./'):
+        variants.append(raw[2:])
+    else:
+        variants.append('./' + raw)
+
+    p = Path(raw)
+    try:
+        variants.append(str(p.resolve()))
+    except Exception:
+        pass
+
+    uniq = []
+    seen = set()
+    for v in variants:
+        pf = rule_to_postfix(v)
+        if pf in seen:
+            continue
+        seen.add(pf)
+        uniq.append(pf)
+    return uniq
 
 def infer_pred_path(pred_root: str, dataset: str, model_name: str, split: str, rule_file: str) -> Path:
     postfix = rule_to_postfix(rule_file)
     return Path(pred_root) / dataset / model_name / split / postfix / 'predictions.jsonl'
 
+def infer_pred_paths(pred_root: str, dataset: str, model_name: str, split: str, rule_file: str) -> List[Path]:
+    postfixes = rule_to_postfix_variants(rule_file)
+    if not postfixes:
+        postfixes = [rule_to_postfix(rule_file)]
+    return [Path(pred_root) / dataset / model_name / split / pf / 'predictions.jsonl' for pf in postfixes]
 
 
 
@@ -47,18 +86,32 @@ def discover_pred_paths(pred_root: str, rule_file: str) -> List[Path]:
     if not root.exists():
         return []
 
-    # Common structure: results/KGQA/<dataset>/<model>/<split>/<rule_postfix>/predictions.jsonl
-    pattern = f"*/**/{postfix}/predictions.jsonl"
-    matches = [p for p in root.glob(pattern) if p.is_file()]
+    matches = []
+
+    # Prefer exact rule_postfix matches (with path-format variants).
+    postfixes = rule_to_postfix_variants(rule_file)
+    for postfix in postfixes:
+        pattern = f"**/{postfix}/predictions.jsonl"
+        matches.extend([p for p in root.glob(pattern) if p.is_file()])
+
+    # Fallback: any predictions under pred_root.
+    if not matches:
+        matches = [p for p in root.glob('**/predictions.jsonl') if p.is_file()]
 
     # Prioritize poison-like datasets (e.g., cascade-poison, cwq-mini-poison)
     def score(path: Path) -> int:
         parts = [x.lower() for x in path.parts]
         return 1 if any('poison' in x for x in parts) else 0
 
-    return sorted(matches, key=score, reverse=True)
-
-
+    uniq = []
+    seen = set()
+    for p in sorted(matches, key=score, reverse=True):
+        s = str(p)
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(p)
+    return uniq
 
 def list_similar_jsonl(path: str, limit: int = 10) -> List[str]:
     p = Path(path)
@@ -74,6 +127,37 @@ def list_similar_jsonl(path: str, limit: int = 10) -> List[str]:
     all_jsonl = sorted([str(x) for x in base.glob('*.jsonl') if x.is_file()])
     return all_jsonl[:limit]
 
+def resolve_poison_data_file(path: str, dataset_hint: str = '') -> Tuple[Path, List[str], str]:
+    p = Path(path)
+    if p.exists() and p.is_file():
+        return p, [str(p)], ''
+
+    cands = list_similar_jsonl(path, limit=50)
+    if not cands:
+        return Path(''), [], ''
+
+    base_name = p.name.lower()
+    dataset_hint = str(dataset_hint or '').lower()
+
+    def score(fp: str) -> int:
+        s = str(fp).lower()
+        sc = 0
+        if 'poisoned' in s:
+            sc += 10
+        if 'subquestion' in base_name and 'subquestion' in s:
+            sc += 6
+        if 'mini' in base_name and 'mini' in s:
+            sc += 4
+        if dataset_hint:
+            parts = [x for x in dataset_hint.replace('_', '-').split('-') if x]
+            if any(x in s for x in parts):
+                sc += 3
+        return sc
+
+    ranked = sorted(cands, key=lambda x: (score(x), -len(x)), reverse=True)
+    chosen = Path(ranked[0])
+    warning = f'poison_data_file not found; auto-resolved to {chosen}'
+    return chosen, ranked, warning
 
 def validate_required_file(path: str, field_name: str) -> Tuple[bool, dict]:
     p = Path(path)
@@ -164,14 +248,15 @@ def main():
         poison_pred_path = Path(args.poison_pred_file)
         candidates = [poison_pred_path]
     else:
-        poison_pred_path = infer_pred_path(
+        inferred = infer_pred_paths(
             pred_root=args.pred_root,
             dataset=args.dataset,
             model_name=args.model_name,
             split=args.split,
             rule_file=args.rule_file,
         )
-        candidates = [poison_pred_path] + discover_pred_paths(args.pred_root, args.rule_file)
+        poison_pred_path = inferred[0]
+        candidates = inferred + discover_pred_paths(args.pred_root, args.rule_file)
         # de-duplicate while preserving order
         uniq = []
         seen = set()
@@ -194,12 +279,16 @@ def main():
         return
     poison_pred_path = resolved
 
-    ok, err = validate_required_file(args.poison_data_file, 'poison_data_file')
-    if not ok:
+    resolved_poison_data_file, poison_data_candidates, poison_data_warning = resolve_poison_data_file(
+        args.poison_data_file,
+        dataset_hint=args.dataset,
+    )
+    if not resolved_poison_data_file:
+        ok, err = validate_required_file(args.poison_data_file, 'poison_data_file')
         print(json.dumps(err, ensure_ascii=False, indent=2))
         return
 
-    poison_data = load_jsonl(args.poison_data_file)
+    poison_data = load_jsonl(str(resolved_poison_data_file))
     poison_pred = load_jsonl(str(poison_pred_path))
 
     resolved_rule_file, rule_candidates = resolve_rule_file(args.rule_file, args.rule_root, poison_pred_path)
@@ -265,6 +354,9 @@ def main():
 
     print(json.dumps({
         'resolved_poison_pred_file': str(poison_pred_path),
+        'resolved_poison_data_file': str(resolved_poison_data_file),
+        'poison_data_warning': poison_data_warning,
+        'poison_data_candidates': poison_data_candidates[:10],
         'resolved_rule_file': str(resolved_rule_file) if rule_stats_enabled else '',
         'rule_stats_enabled': rule_stats_enabled,
         'rule_warning': rule_warning,

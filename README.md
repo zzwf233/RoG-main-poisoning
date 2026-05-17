@@ -143,6 +143,8 @@ Results
 
 Table-3 Reproduction (paper-aligned script)
 - Script: `bash scripts/run_table3_paper_aligned.sh`
+- Clean-only alignment check: `bash scripts/run_clean_alignment_check.sh`
+  (runs `rule + predict_clean` only and prints `args.txt` + `eval_result.txt` for quick paper-gap diagnosis).
 - `scripts/table3_collect.py` is used by the `table3` stage to aggregate Clean/Rand/Ours into final CSV rows.
   If you don't need CSV aggregation, you can run with `STAGES=rule,poison,predict`.
 - You can also run attackers separately:
@@ -165,10 +167,13 @@ Table-3 Reproduction (paper-aligned script)
   If these files are missing, the script now auto-falls back to:
   - `datasets/RoG-cwq_test.jsonl`
   - `datasets/RoG-webqsp_test.jsonl`
-- It also prints a dataset-size sanity line (`CWQ≈3531`, `WebQSP≈1639`).
-  If your size differs a lot, your Clean/Rand numbers are usually not directly comparable to Table 3.
+- - For your setting, it is acceptable that `Ours` uses a larger eval size (e.g., after sub-question decomposition),
+  but `Clean` and `Rand` should stay on the same base test split for fair comparison.
 - Table-3 collector prefers `detailed_eval_result.jsonl` (if present) for Hit/F1/Precision/Recall
   so metrics stay consistent with `predict_answer.py`'s built-in evaluator.
+- If your non-ChatGPT backbone is still far below the paper's Table-3 trend, run:
+  `bash scripts/plug-and-play.sh` and verify that each model is evaluated separately.
+  (The script now uses proper bash arrays; older scalar-loop behavior can silently evaluate with wrong model settings.)
 
 Bibinfo
 If you found this repo helpful, please help us by citing this paper:

@@ -45,13 +45,25 @@ def merge_rule_result(qa_dataset, rule_dataset, n_proc=1, filter_empty=False):
         }
 
     def find_rule(sample):
-        qid = sample["id"]
+        qid = str(sample["id"])
         sample["predicted_paths"] = []
         sample["ground_paths"] = []
+        sample["rule_lookup_id"] = qid
+        sample["rule_lookup_fallback"] = False
 
         if qid in question_to_rule:
             sample["predicted_paths"] = question_to_rule[qid]["predicted_paths"]
             sample["ground_paths"] = question_to_rule[qid]["ground_paths"]
+        elif "_" in qid:
+            # 兼容子问题/派生样本 ID：优先回退到 parent/base id 对应的 rule
+            parent_qid = qid.split("_")[0]
+            if parent_qid in question_to_rule:
+                sample["predicted_paths"] = question_to_rule[parent_qid]["predicted_paths"]
+                sample["ground_paths"] = question_to_rule[parent_qid]["ground_paths"]
+                sample["rule_lookup_id"] = parent_qid
+                sample["rule_lookup_fallback"] = True
+            else:
+                print(f"Warning: ID {qid} not found in rule set. Skipping sample.")
         else:
             print(f"Warning: ID {qid} not found in rule set. Skipping sample.")
 

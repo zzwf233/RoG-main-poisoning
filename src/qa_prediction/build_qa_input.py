@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.dirname(os.path.realpath(__file__)) + "/..")
 import utils
 import random
+import re
 from typing import Callable
 
 
@@ -11,7 +12,7 @@ class PromptBuilder(object):
     MCQ_INSTRUCTION = """Please answer the following questions. Please select the answers from the given choices and return the answer only."""
     SAQ_INSTRUCTION = """Please answer the following questions. Please keep the answer as simple as possible and return all the possible answer as a list."""
     MCQ_RULE_INSTRUCTION = """Based on the reasoning paths, please answer the given question. Please select the answers from the given choices and return the answers only."""
-    SAQ_RULE_INSTRUCTION = """Based on the reasoning paths, please answer the given question. Please keep the answer as simple as possible and return all the possible answers as a list."""
+    SAQ_RULE_INSTRUCTION = """Based on the reasoning paths, answer the question with entities only. Return only the final answers (one per line), with no explanation."""
     COT = """ Let's think it step by step."""
     EXPLAIN = """ Please explain your answer."""
     QUESTION = """Question:\n{question}"""
@@ -20,7 +21,8 @@ class PromptBuilder(object):
     EACH_LINE = """ Please return each answer in a new line."""
 
     def __init__(self, prompt_path, add_rule=False, use_true=False, cot=False, explain=False, use_random=False,
-                 each_line=False, maximun_token=4096, tokenize: Callable = lambda x: len(x)):
+                 each_line=False, maximun_token=4096, tokenize: Callable = lambda x: len(x),
+                 path_top_k: int = 20, bidirectional_graph: bool = False):
         self.prompt_template = self._read_prompt_template(prompt_path)
         self.add_rule = add_rule
         self.use_true = use_true
@@ -30,6 +32,8 @@ class PromptBuilder(object):
         self.maximun_token = maximun_token
         self.tokenize = tokenize
         self.each_line = each_line
+        self.path_top_k = max(0, int(path_top_k))
+        self.bidirectional_graph = bidirectional_graph
 
     def _read_prompt_template(self, template_file):
         with open(template_file) as fin:
@@ -50,7 +54,7 @@ class PromptBuilder(object):
         return results
 
     def direct_answer(self, question_dict):
-        graph = utils.build_graph(question_dict['graph'])
+        graph = utils.build_graph(question_dict['graph'], bidirectional=self.bidirectional_graph)
         entities = question_dict['q_entity']
         rules = question_dict['predicted_paths']
         prediction = []
@@ -136,7 +140,7 @@ class PromptBuilder(object):
             # 🔍 修改 1: 安全获取 graph，防止 key error
             graph_data = question_dict.get('graph', [])
             if graph_data:
-                graph = utils.build_graph(graph_data)
+                graph = utils.build_graph(graph_data, bidirectional=self.bidirectional_graph)
             else:
                graph = {}
 
@@ -319,6 +323,8 @@ class PromptBuilder(object):
             return score
 
         ranked_paths = sorted(unique_paths, key=path_score, reverse=True)
+        if self.path_top_k > 0:
+            ranked_paths = ranked_paths[:self.path_top_k]
 
         new_list_of_paths = []
         for p in ranked_paths:

@@ -24,14 +24,9 @@ PRED_MODEL_PATH=${PRED_MODEL_PATH:-${MODEL_PATH}}
 PROMPT_PATH=${PROMPT_PATH:-prompts/llama2_predict.txt}
 N_BEAM=${N_BEAM:-3}
 
-# Separate attack-strength knobs for rand/ours.
-# Rand defaults are intentionally mild to prevent over-poisoning collapse.
-RAND_HOP_REPEAT=${RAND_HOP_REPEAT:-3}
-RAND_SINGLE_HOP_REPEAT=${RAND_SINGLE_HOP_REPEAT:-6}
-RAND_FRONT_BOOST=${RAND_FRONT_BOOST:-1.0}
-RAND_HOP_BOOST_MATCH=${RAND_HOP_BOOST_MATCH:-1.0}
-RAND_HOP_BOOST_MISMATCH=${RAND_HOP_BOOST_MISMATCH:-1.0}
-RAND_INJECT_TOP_K=${RAND_INJECT_TOP_K:-1}
+# Rand dataset-level controls (single pathway).
+RAND_DATASET_SEED=${RAND_DATASET_SEED:-42}
+RAND_SWAP_PER_SAMPLE=${RAND_SWAP_PER_SAMPLE:-1}
 
 OURS_HOP_REPEAT=${OURS_HOP_REPEAT:-100}
 OURS_SINGLE_HOP_REPEAT=${OURS_SINGLE_HOP_REPEAT:-200}
@@ -39,6 +34,7 @@ OURS_FRONT_BOOST=${OURS_FRONT_BOOST:-1.4}
 OURS_HOP_BOOST_MATCH=${OURS_HOP_BOOST_MATCH:-1.5}
 OURS_HOP_BOOST_MISMATCH=${OURS_HOP_BOOST_MISMATCH:-0.7}
 OURS_INJECT_TOP_K=${OURS_INJECT_TOP_K:-3}
+RAND_MODE=${RAND_MODE:-rand_local}
 
 RULE_ROOT=${RULE_ROOT:-results/gen_rule_path}
 PRED_ROOT=${PRED_ROOT:-results/KGQA}
@@ -272,21 +268,70 @@ poison_rand_stage() {
   local d="$1"
   local rand_file
   rand_file="$(dataset_rand_base_file "$d")"
-  local rf
-  rf="$(rule_file_clean "$d")"
+  local out_file="datasets/poisoned_${d}_rand.jsonl"
 
-  python src/attack_scripts_adaptive/poison_data_adaptive.py \
-    --input_file "$rand_file" \
-    --rule_file "$rf" \
-    --output_file "datasets/poisoned_${d}_rand.jsonl" \
-    --mode rand \
-    --inject_top_k "$RAND_INJECT_TOP_K" \
-    --hop_repeat "$RAND_HOP_REPEAT" \
-    --single_hop_repeat "$RAND_SINGLE_HOP_REPEAT" \
-    --front_boost "$RAND_FRONT_BOOST" \
-    --hop_boost_if_type_match "$RAND_HOP_BOOST_MATCH" \
-    --hop_boost_if_type_mismatch "$RAND_HOP_BOOST_MISMATCH"
+  python - "$rand_file" "$out_file" "$RAND_DATASET_SEED" "$RAND_SWAP_PER_SAMPLE" <<'PY'
+import json
+import random
+import sys
+from pathlib import Path
+
+in_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+seed = int(sys.argv[3])
+swap_per_sample = max(1, int(sys.argv[4]))
+random.seed(seed)
+
+rows = []
+with in_path.open("r", encoding="utf-8") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+
+graphs = []
+for item in rows:
+    g = item.get("graph", [])
+    if isinstance(g, list) and g:
+        graphs.append(g)
+
+if not graphs:
+    raise SystemExit(f"No valid graph found in: {in_path}")
+
+out_path.parent.mkdir(parents=True, exist_ok=True)
+with out_path.open("w", encoding="utf-8") as f:
+    for item in rows:
+        cur = dict(item)
+        graph = cur.get("graph", [])
+        if not isinstance(graph, list):
+            graph = []
+
+        replaced_graph = [list(t) if isinstance(t, list) else t for t in graph]
+        for _ in range(swap_per_sample):
+            donor = random.choice(graphs)
+            tri = random.choice(donor) if donor else None
+            if not (isinstance(tri, list) and len(tri) >= 3):
+                continue
+            tri_new = [str(tri[0]), str(tri[1]), str(tri[2])]
+            if replaced_graph:
+                pos = random.randrange(len(replaced_graph))
+                replaced_graph[pos] = tri_new
+            else:
+                replaced_graph.append(tri_new)
+
+        cur["graph"] = replaced_graph
+        cur["attack_mode"] = "paper_rand_dataset_swap"
+        cur["is_poisoned"] = False
+        f.write(json.dumps(cur, ensure_ascii=False) + "\n")
+
+print(f"[rand-dataset] input={in_path} output={out_path} samples={len(rows)} seed={seed} swap_per_sample={swap_per_sample}")
+PY
 }
+
 
 poison_ours_stage() {
   local d="$1"
@@ -301,6 +346,7 @@ poison_ours_stage() {
     --output_file "datasets/poisoned_${d}_ours.jsonl" \
     --mode ours \
     --inject_top_k "$OURS_INJECT_TOP_K" \
+    --budget_k "$BUDGET_K" \
     --hop_repeat "$OURS_HOP_REPEAT" \
     --single_hop_repeat "$OURS_SINGLE_HOP_REPEAT" \
     --front_boost "$OURS_FRONT_BOOST" \
@@ -557,7 +603,7 @@ main() {
   echo "[config] STAGES=${STAGES}"
   echo "[config] OURS base cwq=${OURS_CWQ_BASE}, webqsp=${OURS_WEBQSP_BASE}, allow_clean_fallback=${OURS_ALLOW_CLEAN_FALLBACK}"
   echo "[config] TABLE3 prefer_detailed_eval=${TABLE3_PREFER_DETAILED_EVAL}"
-  echo "[config] RAND topk=${RAND_INJECT_TOP_K}, repeat=${RAND_HOP_REPEAT}/${RAND_SINGLE_HOP_REPEAT}, front=${RAND_FRONT_BOOST}, match=${RAND_HOP_BOOST_MATCH}, mismatch=${RAND_HOP_BOOST_MISMATCH}"
+  echo "[config] RAND dataset seed=${RAND_DATASET_SEED}, swap_per_sample=${RAND_SWAP_PER_SAMPLE}"
   echo "[config] OURS topk=${OURS_INJECT_TOP_K}, repeat=${OURS_HOP_REPEAT}/${OURS_SINGLE_HOP_REPEAT}, front=${OURS_FRONT_BOOST}, match=${OURS_HOP_BOOST_MATCH}, mismatch=${OURS_HOP_BOOST_MISMATCH}"
 
   for d in cwq webqsp; do
